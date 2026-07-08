@@ -42,6 +42,10 @@ private:
                            const std::filesystem::path& install_prefix);
     void install_built_library(const std::string& name,
                                const std::filesystem::path& built_path);
+    void resolve_transitive_deps(const std::filesystem::path& src_path,
+                                  const std::filesystem::path& install_prefix);
+    std::string search_github_repo(const std::string& package_name);
+    void ensure_build_tools(const std::filesystem::path& bin_dir);
     void export_package_headers();
     void generate_compile_commands();
     void link_from_cache(const std::string& package_name, const std::string& version);
@@ -51,6 +55,7 @@ private:
     std::string detect_compiler(const ProjectConfig& config) const;
     std::string build_compile_command(const ProjectConfig& config) const;
     std::filesystem::path get_output_path(const ProjectConfig& config) const;
+    std::string resolve_latest_tag(const std::string& github_url, const std::string& name);
 };
 
 } // namespace cpm

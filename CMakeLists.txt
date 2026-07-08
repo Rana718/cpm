@@ -14,5 +14,7 @@ target_include_directories(cpm PRIVATE
     ${CMAKE_SOURCE_DIR}/include
 )
 
+target_link_libraries(cpm PRIVATE pthread)
+
 # Install
 install(TARGETS cpm DESTINATION bin)

@@ -1,5 +1,4 @@
 #include <seastar/core/app-template.hh>
-#include <seastar/core/reactor.hh>
 #include <iostream>
 
 int main(int argc, char** argv) {

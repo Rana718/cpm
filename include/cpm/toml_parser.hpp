@@ -27,7 +27,7 @@ struct ProjectConfig {
     std::string version;
     std::string description;
     std::string cpp_standard;  // "17", "20", "23"
-    std::string compiler;      // "gcc", "clang", "msvc" or empty for auto-detect
+    std::string compiler;      // "gcc", "clang", "gcc@13", "clang@17" or empty for auto
 
     // Build config
     std::string entry;         // entry source file (e.g., "main.cpp")
