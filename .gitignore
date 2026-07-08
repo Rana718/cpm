@@ -1,0 +1,11 @@
+# Build
+build/
+cmake-build*/
+
+# CPM
+.cpm/
+
+# IDE
+.vscode/
+.idea/
+*.swp

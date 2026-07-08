@@ -1,0 +1,18 @@
+# CPM Package Configuration
+
+[project]
+name = "myapp"
+version = "0.1.0"
+description = "uWebSockets backend test"
+cpp_standard = "20"
+entry = "main.cpp"
+output = "myapp"
+
+[scripts]
+start = "./myapp"
+
+[dependencies]
+uWebSockets = "github:uNetworking/uWebSockets"
+
+[system-dependencies]
+uSockets = "github:uNetworking/uSockets"

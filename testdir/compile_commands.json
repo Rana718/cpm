@@ -1,0 +1,7 @@
+[
+  {
+    "directory": "/run/media/rana/DEV/code/Experment/cpm/testdir",
+    "command": "g++ -std=c++20 -I/run/media/rana/DEV/code/Experment/cpm/testdir/.cpm/include -c main.cpp",
+    "file": "/run/media/rana/DEV/code/Experment/cpm/testdir/main.cpp"
+  }
+]
