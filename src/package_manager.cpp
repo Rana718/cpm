@@ -307,7 +307,7 @@ bool PackageManager::build_from_source(
           "ragel", "stow", "valgrind", "lksctp-tools",
           "python3Packages.pyelftools", "dpdk", "openssl", "libxml2",
           "automake", "autoconf", "libtool", "libtasn1", "zlib",
-          "p11-kit"
+          "p11-kit", "xfsprogs"
       };
 
       // Generate shell.nix
