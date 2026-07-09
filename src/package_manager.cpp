@@ -1586,7 +1586,14 @@ PackageManager::build_compile_command(const ProjectConfig &config) const {
     }
 
     // Add common system libs that compiled deps often need
-    cmd << " -lz -lpthread";
+    cmd << " -lz -lpthread -ldl -lrt -latomic";
+
+    // When linking seastar or complex libs, add their transitive deps
+    // These are available in nix-shell PATH at link time
+    if (std::filesystem::exists(lib_dir / "libseastar.a")) {
+      cmd << " -lfmt -lboost_program_options -lboost_thread -lboost_filesystem -lboost_chrono";
+      cmd << " -lyaml-cpp -lhwloc -lgnutls -luring -lnuma -lcares -lprotobuf -lsctp";
+    }
   }
 
   return cmd.str();
@@ -1617,8 +1624,45 @@ int PackageManager::build() {
   std::cout << "[cpm] " << compiler << " | c++" << config.cpp_standard << " | "
             << Config::get_architecture() << "\n";
 
+  // If any system dep was built with nix, run compile inside nix-shell
+  // so linker can find all nix-provided shared libs
+  NixBackend nix(local_cpm_dir_);
+  bool use_nix_shell = false;
+  std::filesystem::path shell_nix_path;
+
+  if (nix.is_available() && !config.system_dependencies.empty()) {
+    // Check if any dep has a shell.nix in its source cache
+    for (const auto& dep : config.system_dependencies) {
+      std::string version = dep.version;
+      if (version == "*" || version.empty()) version = "HEAD";
+      // Search for shell.nix in cached source
+      for (const auto& entry : std::filesystem::directory_iterator(global_cache_dir_)) {
+        if (entry.path().filename().string().find(dep.name) != std::string::npos &&
+            entry.path().filename().string().find("-src") != std::string::npos) {
+          auto snix = entry.path() / "shell.nix";
+          if (std::filesystem::exists(snix)) {
+            shell_nix_path = snix;
+            use_nix_shell = true;
+            break;
+          }
+        }
+      }
+      if (use_nix_shell) break;
+    }
+  }
+
   std::cout.flush();
-  int ret = std::system(compile_cmd.c_str());
+  int ret;
+
+  if (use_nix_shell) {
+    // Wrap compile command in nix-shell for proper linking
+    std::string nix_cmd = "nix-shell " + shell_nix_path.string() +
+                          " --run " + "'" + compile_cmd + "'" + " 2>&1";
+    ret = std::system(nix_cmd.c_str());
+  } else {
+    ret = std::system(compile_cmd.c_str());
+  }
+
   if (ret != 0) {
     std::cerr << "[cpm] Build failed.\n";
     return 1;
