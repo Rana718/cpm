@@ -1,7 +1,7 @@
 [
   {
     "directory": "/run/media/rana/DEV/code/Experment/cpm/testdir",
-    "command": "g++ -std=c++20 -I/run/media/rana/DEV/code/Experment/cpm/testdir/.cpm/include -c main.cpp",
+    "command": "g++ -std=c++20 -I/run/media/rana/DEV/code/Experment/cpm/testdir/.cpm/include -DSEASTAR_SCHEDULING_GROUPS_COUNT=16 -DSEASTAR_API_LEVEL=7 -DSEASTAR_SSTRING -DSEASTAR_LOGGER_COMPILE_TIME_FMT -c main.cpp",
     "file": "/run/media/rana/DEV/code/Experment/cpm/testdir/main.cpp"
   }
 ]
