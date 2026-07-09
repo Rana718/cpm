@@ -11,21 +11,18 @@ class PackageManager {
 public:
     PackageManager();
 
-    // Core commands
+    // Commands
     void init(const std::string& project_name);
     void install();
     void install_package(const std::string& package_spec);
     void remove_package(const std::string& package_name);
     void update();
     void list();
-
-    // Build & Run
     int build();
     int run();
     int start();
-
-    // Environment
     void setup_environment();
+
     std::string get_include_flags() const;
     std::string get_library_flags() const;
 
@@ -35,7 +32,13 @@ private:
     std::filesystem::path global_cache_dir_;
 
     void ensure_directories();
+
+    // Header-only packages
+    void install_header_package(const GitDependency& dep);
     void clone_git_dependency(const GitDependency& dep);
+
+    // Compiled packages (uses nix)
+    void install_system_package(const SystemDependency& dep, const ProjectConfig& config);
     void resolve_system_dependency(const SystemDependency& dep);
     bool build_from_source(const std::string& name,
                            const std::filesystem::path& src_path,
@@ -46,16 +49,21 @@ private:
                                   const std::filesystem::path& install_prefix);
     std::string search_github_repo(const std::string& package_name);
     void ensure_build_tools(const std::filesystem::path& bin_dir);
+
+    // Utilities
+    std::string resolve_latest_tag(const std::string& github_url, const std::string& name);
     void export_package_headers();
     void generate_compile_commands();
-    void link_from_cache(const std::string& package_name, const std::string& version);
-    bool is_cached(const std::string& package_name, const std::string& version) const;
-    std::filesystem::path get_cache_path(const std::string& package_name, const std::string& version) const;
+    void auto_remove_stale(const ProjectConfig& config);
+    void link_from_cache(const std::string& name, const std::string& version);
+    bool is_cached(const std::string& name, const std::string& version) const;
+    std::filesystem::path get_cache_path(const std::string& name, const std::string& version) const;
 
+    // Build
     std::string detect_compiler(const ProjectConfig& config) const;
     std::string build_compile_command(const ProjectConfig& config) const;
     std::filesystem::path get_output_path(const ProjectConfig& config) const;
-    std::string resolve_latest_tag(const std::string& github_url, const std::string& name);
+    std::filesystem::path find_shell_nix() const;
 };
 
 } // namespace cpm

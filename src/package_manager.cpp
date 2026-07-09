@@ -1,10 +1,9 @@
 #include "cpm/package_manager.hpp"
 #include "cpm/config.hpp"
 #include "cpm/environment.hpp"
-#include "cpm/nix_backend.hpp"
+#include "cpm/nix_env.hpp"
 #include "cpm/progress.hpp"
 #include "cpm/resolver.hpp"
-#include "cpm/toolchain.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -280,8 +279,8 @@ bool PackageManager::build_from_source(
 
     // If nix is available, run cooking.sh inside nix-shell
     // nix provides ALL deps (boost, gmp, gnutls, etc.) — no need to download/build them
-    NixBackend nix(local_cpm_dir_);
-    if (nix.is_available()) {
+    NixEnv nix(local_cpm_dir_, global_cache_dir_);
+    if (nix.available()) {
       std::cout << "[cpm]   → building inside nix environment (all deps provided)\n";
 
       // Get compiler from toml (default gcc13 for compatibility)
@@ -290,12 +289,16 @@ bool PackageManager::build_from_source(
       if (fs::exists(toml_path_nix)) {
         auto cfg = TomlParser::parse(toml_path_nix);
         if (!cfg.compiler.empty()) {
-          auto spec = Toolchain::parse_compiler(cfg.compiler);
-          if (spec.type == "clang") {
-            nix_compiler = "clang_" + spec.version;
-          } else if (spec.pinned) {
-            nix_compiler = "gcc" + spec.version;
+          // Parse compiler: "gcc-13" → gcc13, "clang-17" → clang_17
+          std::string comp = cfg.compiler;
+          if (comp.find("clang") != std::string::npos) {
+            auto dash = comp.find("-"); 
+            nix_compiler = dash != std::string::npos ? "clang_" + comp.substr(dash+1) : "clang";
+          } else {
+            auto dash = comp.find("-");
+            nix_compiler = dash != std::string::npos ? "gcc" + comp.substr(dash+1) : "gcc";
           }
+          // Parse compiler: "gcc-13" → gcc13, "clang-17" → clang_17
         }
       }
 
@@ -372,10 +375,10 @@ bool PackageManager::build_from_source(
 
       for (const auto& pkg : link_pkgs) {
         // Try .dev output first (has headers), then normal output
-        std::string store_path = nix.run_nix(
+        std::string store_path = nix.run_cmd(
             "nix-build '<nixpkgs>' -A " + pkg + ".dev --no-out-link 2>/dev/null");
         if (store_path.empty()) {
-          store_path = nix.run_nix(
+          store_path = nix.run_cmd(
               "nix-build '<nixpkgs>' -A " + pkg + " --no-out-link 2>/dev/null");
         }
         if (!store_path.empty()) {
@@ -437,11 +440,10 @@ bool PackageManager::build_from_source(
     if (fs::exists(toml_path)) {
       auto config = TomlParser::parse(toml_path);
       if (!config.compiler.empty()) {
-        auto spec = Toolchain::parse_compiler(config.compiler);
-        if (spec.pinned) {
-          Toolchain tc(local_cpm_dir_);
-          std::string cxx = tc.get_cxx(spec);
-          std::string cc = tc.get_cc(spec);
+        auto spec = config.compiler;
+        if (!config.compiler.empty()) {
+          std::string cxx = config.compiler;
+          std::string cc = config.compiler;
           // Verify compiler exists
           std::string check = "which " + cxx + " > /dev/null 2>&1";
           if (std::system(check.c_str()) == 0) {
@@ -465,10 +467,9 @@ bool PackageManager::build_from_source(
     if (fs::exists(toml_path)) {
       auto config = TomlParser::parse(toml_path);
       if (!config.compiler.empty()) {
-        auto spec = Toolchain::parse_compiler(config.compiler);
-        Toolchain tc(local_cpm_dir_);
-        sys_cc = tc.get_cc(spec);
-        sys_cxx = tc.get_cxx(spec);
+        auto spec = config.compiler;
+        sys_cc = config.compiler;
+        sys_cxx = config.compiler;
       }
     }
     // Use -s to set CC/CXX as env vars (cooking.sh's -s flag = env vars)
@@ -1421,10 +1422,9 @@ void PackageManager::install() {
 
   // ─── Ensure toolchain is ready BEFORE building anything ───
   if (!config.compiler.empty()) {
-    auto spec = Toolchain::parse_compiler(config.compiler);
-    if (spec.pinned) {
-      Toolchain tc(local_cpm_dir_);
-      tc.ensure_compiler(spec);
+    auto spec = config.compiler;
+    if (!config.compiler.empty()) {
+      config.compiler;
     }
   }
 
@@ -1540,10 +1540,9 @@ void PackageManager::install() {
 std::string PackageManager::detect_compiler(const ProjectConfig &config) const {
   if (!config.compiler.empty()) {
     // Check if it's a pinned version like "gcc@13" or "clang@17"
-    auto spec = Toolchain::parse_compiler(config.compiler);
-    if (spec.pinned) {
-      Toolchain tc(local_cpm_dir_);
-      return tc.ensure_compiler(spec);
+    auto spec = config.compiler;
+    if (!config.compiler.empty()) {
+      return config.compiler;
     }
 
     if (config.compiler == "gcc")
@@ -1686,11 +1685,11 @@ int PackageManager::build() {
 
   // If any system dep was built with nix, run compile inside nix-shell
   // so linker can find all nix-provided shared libs
-  NixBackend nix(local_cpm_dir_);
+  NixEnv nix(local_cpm_dir_, global_cache_dir_);
   bool use_nix_shell = false;
   std::filesystem::path shell_nix_path;
 
-  if (nix.is_available() && !config.system_dependencies.empty()) {
+  if (nix.available() && !config.system_dependencies.empty()) {
     // Check if any dep has a shell.nix in its source cache
     for (const auto& dep : config.system_dependencies) {
       std::string version = dep.version;

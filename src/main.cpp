@@ -1,8 +1,10 @@
 #include "cpm/package_manager.hpp"
 #include "cpm/config.hpp"
-#include "cpm/nix_backend.hpp"
+#include "cpm/nix_env.hpp"
 #include <iostream>
 #include <string>
+#include <cstdlib>
+#include <filesystem>
 #include <vector>
 
 void print_usage() {
@@ -104,11 +106,11 @@ int main(int argc, char* argv[]) {
         }
         else if (command == "setup") {
             // Setup nix backend for fast pre-built packages
-            cpm::NixBackend nix(std::filesystem::current_path() / ".cpm");
-            if (nix.is_available()) {
+            cpm::NixEnv nix(std::filesystem::current_path() / ".cpm", std::filesystem::path(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") / ".cpm" / "cache");
+            if (nix.available()) {
                 std::cout << "[cpm] Nix is already installed and ready.\n";
             } else {
-                nix.install_nix();
+                std::system("curl --proto =https --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install --no-confirm 2>&1");
             }
         }
         else if (command == "--help" || command == "-h" || command == "help") {

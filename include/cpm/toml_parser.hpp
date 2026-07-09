@@ -13,13 +13,12 @@ struct GitDependency {
     std::string version;  // tag, branch, or "*" for latest
 };
 
-// System/compiled dependencies — downloaded from source, built inside .cpm/
-// These produce .so/.a files in .cpm/lib/ and headers in .cpm/include/
 struct SystemDependency {
     std::string name;
     std::string github_url;
     std::string version;
-    // Build system auto-detected: cmake, make, meson
+    // Nix packages needed for this dep (auto-detected or user-specified)
+    std::vector<std::string> nix_deps;
 };
 
 struct ProjectConfig {
@@ -27,20 +26,17 @@ struct ProjectConfig {
     std::string version;
     std::string description;
     std::string cpp_standard;  // "17", "20", "23"
-    std::string compiler;      // "gcc", "clang", "gcc@13", "clang@17" or empty for auto
+    std::string compiler;      // "gcc", "gcc-13", "clang-17", or empty (auto from deps)
 
-    // Build config
-    std::string entry;         // entry source file (e.g., "main.cpp")
-    std::string output;        // output binary name (defaults to project name)
+    std::string entry;
+    std::string output;
+    std::string start_script;
 
-    // Scripts
-    std::string start_script;  // command to run after build (defaults to ./output)
-
-    // Header-only dependencies (just clone + expose headers)
     std::vector<GitDependency> git_dependencies;
-
-    // Compiled dependencies (clone + build + install into .cpm/)
     std::vector<SystemDependency> system_dependencies;
+
+    // Nix configuration
+    std::vector<std::string> extra_nix_deps; // user can add extra nix packages
 };
 
 class TomlParser {

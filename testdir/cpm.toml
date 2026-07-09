@@ -1,14 +1,18 @@
+# CPM Package Configuration
+
 [project]
-name = "myapp"
+name = "countries-api"
 version = "0.1.0"
-cpp_standard = "20"
+description = "REST API for countries - Seastar + nlohmann/json"
+cpp_standard = "23"
 entry = "main.cpp"
-output = "myapp"
+output = "countries-api"
 
 [scripts]
-start = "./myapp"
+start = "./countries-api"
 
 [dependencies]
+json = "github:nlohmann/json"
 
 [system-dependencies]
 seastar = "github:scylladb/seastar"
