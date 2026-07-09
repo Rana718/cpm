@@ -955,10 +955,8 @@ void PackageManager::install_built_library(
   auto src_defines = built_path / "defines.txt";
   auto dst_defines = local_cpm_dir_ / "defines.txt";
   if (fs::exists(src_defines)) {
-    // Append to existing defines (multiple packages may have defines)
-    std::ifstream in(src_defines);
-    std::ofstream out(dst_defines, std::ios::app);
-    out << in.rdbuf();
+    // Overwrite (not append) — install runs fresh each time
+    fs::copy(src_defines, dst_defines, fs::copy_options::overwrite_existing);
   }
 }
 
@@ -1212,22 +1210,72 @@ void PackageManager::export_package_headers() {
 }
 
 void PackageManager::generate_compile_commands() {
+  namespace fs = std::filesystem;
   auto toml_path = project_root_ / "cpm.toml";
-  if (!std::filesystem::exists(toml_path))
+  if (!fs::exists(toml_path))
     return;
 
   auto config = TomlParser::parse(toml_path);
   auto include_dir = local_cpm_dir_ / "include";
 
+  // Build the flags string
+  std::string compiler = detect_compiler(config);
+  std::string flags = " -std=c++" + config.cpp_standard;
+  if (fs::exists(include_dir)) {
+    flags += " -I" + include_dir.string();
+  }
+
+  // Add defines from .cpm/defines.txt
+  auto defines_file = local_cpm_dir_ / "defines.txt";
+  if (fs::exists(defines_file)) {
+    std::ifstream df(defines_file);
+    std::string define;
+    while (std::getline(df, define)) {
+      if (!define.empty() && define[0] == '-') {
+        flags += " " + define;
+      }
+    }
+  }
+
+  // Collect all source files (.cpp, .cc, .cxx)
+  std::vector<fs::path> source_files;
+  for (const auto& entry : fs::directory_iterator(project_root_)) {
+    if (!entry.is_regular_file()) continue;
+    auto ext = entry.path().extension().string();
+    if (ext == ".cpp" || ext == ".cc" || ext == ".cxx") {
+      source_files.push_back(entry.path());
+    }
+  }
+  // Also scan src/ subdirectory if exists
+  auto src_dir = project_root_ / "src";
+  if (fs::exists(src_dir) && fs::is_directory(src_dir)) {
+    for (const auto& entry : fs::recursive_directory_iterator(src_dir)) {
+      if (!entry.is_regular_file()) continue;
+      auto ext = entry.path().extension().string();
+      if (ext == ".cpp" || ext == ".cc" || ext == ".cxx") {
+        source_files.push_back(entry.path());
+      }
+    }
+  }
+
+  // If no sources found, at least add the entry file
+  if (source_files.empty() && !config.entry.empty()) {
+    source_files.push_back(project_root_ / config.entry);
+  }
+
+  // Write compile_commands.json with entry for each source file
   std::ofstream cc(project_root_ / "compile_commands.json");
   cc << "[\n";
-  cc << "  {\n";
-  cc << "    \"directory\": \"" << project_root_.string() << "\",\n";
-  cc << "    \"command\": \"" << detect_compiler(config) << " -std=c++"
-     << config.cpp_standard << " -I" << include_dir.string() << " -c "
-     << config.entry << "\",\n";
-  cc << "    \"file\": \"" << (project_root_ / config.entry).string() << "\"\n";
-  cc << "  }\n";
+  for (size_t i = 0; i < source_files.size(); ++i) {
+    cc << "  {\n";
+    cc << "    \"directory\": \"" << project_root_.string() << "\",\n";
+    cc << "    \"command\": \"" << compiler << flags << " -c "
+       << source_files[i].filename().string() << "\",\n";
+    cc << "    \"file\": \"" << source_files[i].string() << "\"\n";
+    cc << "  }";
+    if (i + 1 < source_files.size()) cc << ",";
+    cc << "\n";
+  }
   cc << "]\n";
   cc.close();
 }
@@ -1555,8 +1603,20 @@ PackageManager::build_compile_command(const ProjectConfig &config) const {
     }
   }
 
-  // Source file
+  // Source files — entry file + any .cpp files in src/ directory
   cmd << " " << config.entry;
+
+  // Also compile all .cpp files in src/ if it exists
+  auto src_dir = project_root_ / "src";
+  if (std::filesystem::exists(src_dir) && std::filesystem::is_directory(src_dir)) {
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(src_dir)) {
+      if (!entry.is_regular_file()) continue;
+      auto ext = entry.path().extension().string();
+      if (ext == ".cpp" || ext == ".cc" || ext == ".cxx") {
+        cmd << " " << entry.path().string();
+      }
+    }
+  }
 
   // Output binary
   cmd << " -o " << get_output_path(config).string();
