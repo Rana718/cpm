@@ -1,10 +1,7 @@
-# CPM Package Configuration
-
 [project]
 name = "myapp"
 version = "0.1.0"
 cpp_standard = "20"
-compiler = "clang@17"
 entry = "main.cpp"
 output = "myapp"
 

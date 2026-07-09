@@ -1,7 +1,7 @@
 [
   {
     "directory": "/run/media/rana/DEV/code/Experment/cpm/testdir",
-    "command": "/run/media/rana/DEV/code/Experment/cpm/testdir/.cpm/toolchain/clang-17/bin/clang++ -std=c++20 -I/run/media/rana/DEV/code/Experment/cpm/testdir/.cpm/include -c main.cpp",
+    "command": "g++ -std=c++20 -I/run/media/rana/DEV/code/Experment/cpm/testdir/.cpm/include -c main.cpp",
     "file": "/run/media/rana/DEV/code/Experment/cpm/testdir/main.cpp"
   }
 ]

@@ -1,5 +1,6 @@
 #include "cpm/package_manager.hpp"
 #include "cpm/config.hpp"
+#include "cpm/nix_backend.hpp"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -28,6 +29,7 @@ COMMANDS:
     update              Update all packages
     list                List installed packages
     info                Show system and compiler info
+    setup               Install nix backend (enables fast pre-built packages)
 
 EXAMPLES:
     cpm init myproject
@@ -99,6 +101,15 @@ int main(int argc, char* argv[]) {
         }
         else if (command == "info") {
             print_info();
+        }
+        else if (command == "setup") {
+            // Setup nix backend for fast pre-built packages
+            cpm::NixBackend nix(std::filesystem::current_path() / ".cpm");
+            if (nix.is_available()) {
+                std::cout << "[cpm] Nix is already installed and ready.\n";
+            } else {
+                nix.install_nix();
+            }
         }
         else if (command == "--help" || command == "-h" || command == "help") {
             print_usage();

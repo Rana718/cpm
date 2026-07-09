@@ -1,6 +1,7 @@
 #include "cpm/package_manager.hpp"
 #include "cpm/config.hpp"
 #include "cpm/environment.hpp"
+#include "cpm/nix_backend.hpp"
 #include "cpm/progress.hpp"
 #include "cpm/resolver.hpp"
 #include "cpm/toolchain.hpp"
@@ -271,17 +272,163 @@ bool PackageManager::build_from_source(
   }
 
   // ─── Strategy 2: cooking.sh (self-contained build) ───
-  // cooking.sh downloads ALL deps from source — completely isolated.
-  // It installs deps into build/release/_cooking/installed/
   if (fs::exists(src_path / "cooking.sh")) {
-    std::cout << "[cpm]   → using cooking.sh (self-contained build)\n";
+    std::cout << "[cpm]   → using cooking.sh\n";
 
-    // Ensure stow is available (cooking.sh needs it)
     auto bin_dir = local_cpm_dir_ / "bin";
     fs::create_directories(bin_dir);
+
+    // If nix is available, run cooking.sh inside nix-shell
+    // nix provides ALL deps (boost, gmp, gnutls, etc.) — no need to download/build them
+    NixBackend nix(local_cpm_dir_);
+    if (nix.is_available()) {
+      std::cout << "[cpm]   → building inside nix environment (all deps provided)\n";
+
+      // Get compiler from toml (default gcc13 for compatibility)
+      std::string nix_compiler = "gcc13";
+      auto toml_path_nix = project_root_ / "cpm.toml";
+      if (fs::exists(toml_path_nix)) {
+        auto cfg = TomlParser::parse(toml_path_nix);
+        if (!cfg.compiler.empty()) {
+          auto spec = Toolchain::parse_compiler(cfg.compiler);
+          if (spec.type == "clang") {
+            nix_compiler = "clang_" + spec.version;
+          } else if (spec.pinned) {
+            nix_compiler = "gcc" + spec.version;
+          }
+        }
+      }
+
+      // Nix packages needed for the build environment
+      std::vector<std::string> nix_deps = {
+          nix_compiler, "cmake", "ninja", "pkg-config",
+          "boost", "fmt", "yaml-cpp", "lz4", "gnutls", "gmp", "nettle",
+          "liburing", "numactl", "hwloc", "c-ares", "protobuf",
+          "ragel", "stow", "valgrind", "lksctp-tools",
+          "python3Packages.pyelftools", "dpdk", "openssl", "libxml2",
+          "automake", "autoconf", "libtool", "libtasn1", "zlib",
+          "p11-kit"
+      };
+
+      // Generate shell.nix
+      std::string shell_nix_content =
+          "{ pkgs ? import <nixpkgs> {} }:\n"
+          "pkgs.mkShell {\n"
+          "  buildInputs = with pkgs; [\n";
+      for (const auto& dep_name : nix_deps) {
+        shell_nix_content += "    " + dep_name + "\n";
+      }
+      shell_nix_content += "  ];\n}\n";
+
+      auto shell_nix_path = src_path / "shell.nix";
+      { std::ofstream f(shell_nix_path); f << shell_nix_content; }
+
+      // Build inside nix-shell using configure.py (preferred) or cooking.sh
+      std::string build_cmd =
+          "cd " + src_path.string() + " && nix-shell --run '"
+          "export MAKEFLAGS=\"-j$(nproc)\" && "
+          "export CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) && "
+          "./configure.py --mode=release --prefix=" + install_prefix.string() + " && "
+          "ninja -C build/release -j$(nproc) && "
+          "ninja -C build/release install"
+          "' 2>&1";
+
+      ret = std::system(build_cmd.c_str());
+
+      if (ret != 0) {
+        // Fallback: try cooking.sh inside nix-shell
+        std::string cook_cmd =
+            "cd " + src_path.string() + " && nix-shell --run '"
+            "bash ./cooking.sh -t Release -g Ninja -s CC=gcc -s CXX=g++ && "
+            "ninja -C build -j$(nproc)"
+            "' 2>&1";
+        ret = std::system(cook_cmd.c_str());
+      }
+
+      // ─── Copy project headers to install_prefix ───
+      auto src_inc = src_path / "include";
+      if (fs::exists(src_inc)) {
+        fs::create_directories(install_prefix / "include");
+        std::string cp = "cp -r " + src_inc.string() + "/* " +
+                         (install_prefix / "include").string() + "/ 2>/dev/null";
+        std::system(cp.c_str());
+      }
+
+      // Copy built .a files
+      if (fs::exists(src_path / "build")) {
+        fs::create_directories(install_prefix / "lib");
+        std::string find_libs = "find " + (src_path / "build").string() +
+                                " -name '*.a' -not -path '*/_cooking/*' -exec cp {} " +
+                                (install_prefix / "lib").string() + "/ \\; 2>/dev/null";
+        std::system(find_libs.c_str());
+      }
+
+      // ─── Symlink ALL nix dependency headers/libs into install_prefix ───
+      // This ensures cpm build can find boost, fmt, etc. without nix-shell
+      std::vector<std::string> link_pkgs = {
+          "boost", "fmt", "yaml-cpp", "lz4", "gnutls", "gmp", "nettle",
+          "liburing", "numactl", "hwloc", "c-ares", "protobuf", "openssl"
+      };
+
+      for (const auto& pkg : link_pkgs) {
+        // Try .dev output first (has headers), then normal output
+        std::string store_path = nix.run_nix(
+            "nix-build '<nixpkgs>' -A " + pkg + ".dev --no-out-link 2>/dev/null");
+        if (store_path.empty()) {
+          store_path = nix.run_nix(
+              "nix-build '<nixpkgs>' -A " + pkg + " --no-out-link 2>/dev/null");
+        }
+        if (!store_path.empty()) {
+          // Symlink headers
+          auto pkg_inc = std::filesystem::path(store_path) / "include";
+          if (fs::exists(pkg_inc)) {
+            for (const auto& entry : fs::directory_iterator(pkg_inc)) {
+              auto target = install_prefix / "include" / entry.path().filename();
+              if (!fs::exists(target) && !fs::is_symlink(target)) {
+                fs::create_symlink(entry.path(), target);
+              }
+            }
+          }
+          // Symlink libs
+          auto pkg_lib = std::filesystem::path(store_path) / "lib";
+          if (fs::exists(pkg_lib)) {
+            for (const auto& entry : fs::directory_iterator(pkg_lib)) {
+              if (!entry.is_regular_file() && !entry.is_symlink()) continue;
+              auto ext = entry.path().extension().string();
+              if (ext == ".a" || ext == ".so") {
+                auto target = install_prefix / "lib" / entry.path().filename();
+                if (!fs::exists(target) && !fs::is_symlink(target)) {
+                  fs::create_symlink(entry.path(), target);
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // ─── Save compile defines needed by this library ───
+      auto defines_file = install_prefix / "defines.txt";
+      {
+        std::ofstream df(defines_file);
+        // Seastar-specific defines (detected from CMakeLists.txt)
+        if (name == "seastar") {
+          df << "-DSEASTAR_SCHEDULING_GROUPS_COUNT=16\n";
+          df << "-DSEASTAR_API_LEVEL=7\n";
+          df << "-DSEASTAR_SSTRING\n";
+          df << "-DSEASTAR_LOGGER_COMPILE_TIME_FMT\n";
+        }
+      }
+
+      if (ret == 0 || (fs::exists(install_prefix / "include") && !fs::is_empty(install_prefix / "include"))) {
+        if (fs::exists(build_dir)) fs::remove_all(build_dir);
+        return true;
+      }
+    }
+
+    // ─── No nix: use old approach (direct cooking.sh) ───
     ensure_build_tools(bin_dir);
 
-    // Check if user has pinned a compiler — if so, use it for cooking.sh
+    // Check if user has pinned a compiler — use isolated toolchain
     std::string compiler_env;
     // Set parallel build env vars for all sub-builds
     compiler_env += "export MAKEFLAGS=\"-j$(nproc)\" && ";
@@ -293,26 +440,13 @@ bool PackageManager::build_from_source(
         auto spec = Toolchain::parse_compiler(config.compiler);
         if (spec.pinned) {
           Toolchain tc(local_cpm_dir_);
-          std::string cc = tc.get_cc(spec);
           std::string cxx = tc.get_cxx(spec);
-          compiler_env =
-              "export CC=\"" + cc + "\" && export CXX=\"" + cxx + "\" && ";
-          auto tc_path = tc.get_path_prefix();
-          if (!tc_path.empty()) {
-            compiler_env += "export PATH=\"" + tc_path + ":$PATH\" && ";
-          }
-          // If using clang, use libc++ to avoid system libstdc++
-          // incompatibility
-          if (spec.type == "clang") {
-            auto tc_dir =
-                local_cpm_dir_ / "toolchain" / ("clang-" + spec.version);
-            compiler_env += "export CXXFLAGS=\"-stdlib=libc++\" && ";
-            compiler_env +=
-                "export LDFLAGS=\"-stdlib=libc++ -L" +
-                (tc_dir / "lib" / "x86_64-unknown-linux-gnu").string() + " -L" +
-                (tc_dir / "lib").string() + " -Wl,-rpath," +
-                (tc_dir / "lib" / "x86_64-unknown-linux-gnu").string() +
-                "\" && ";
+          std::string cc = tc.get_cc(spec);
+          // Verify compiler exists
+          std::string check = "which " + cxx + " > /dev/null 2>&1";
+          if (std::system(check.c_str()) == 0) {
+            compiler_env += "export CC=\"" + cc + "\" && ";
+            compiler_env += "export CXX=\"" + cxx + "\" && ";
           }
         }
       }
@@ -325,79 +459,98 @@ bool PackageManager::build_from_source(
                            src_path.string() +
                            " && bash ./cooking.sh -t Release";
 
-    // If compiler is pinned, pass it to cmake via -s flags
-    if (!compiler_env.empty()) {
-      auto toml = project_root_ / "cpm.toml";
-      if (fs::exists(toml)) {
-        auto cfg = TomlParser::parse(toml);
-        auto spec = Toolchain::parse_compiler(cfg.compiler);
+    // Always pass the system compiler explicitly so cmake doesn't leave CC empty
+    std::string sys_cc = "gcc";
+    std::string sys_cxx = "g++";
+    if (fs::exists(toml_path)) {
+      auto config = TomlParser::parse(toml_path);
+      if (!config.compiler.empty()) {
+        auto spec = Toolchain::parse_compiler(config.compiler);
         Toolchain tc(local_cpm_dir_);
-        std::string cc = tc.get_cc(spec);
-        std::string cxx = tc.get_cxx(spec);
-        cook_cmd += " -s CMAKE_C_COMPILER=" + cc;
-        cook_cmd += " -s CMAKE_CXX_COMPILER=" + cxx;
-        if (spec.type == "clang") {
-          cook_cmd += " -s CMAKE_CXX_FLAGS=-stdlib=libc++";
-        }
+        sys_cc = tc.get_cc(spec);
+        sys_cxx = tc.get_cxx(spec);
       }
     }
+    // Use -s to set CC/CXX as env vars (cooking.sh's -s flag = env vars)
+    cook_cmd += " -s CC=" + sys_cc;
+    cook_cmd += " -s CXX=" + sys_cxx;
 
-    // Use ninja with max parallelism
+    // Use ninja with max parallelism (-g must be before --)
     cook_cmd += " -g Ninja";
 
-    // Patch known broken/unreachable download URLs with working mirrors
+    // Pass cmake defines LAST via --
+    cook_cmd += " -- -DCMAKE_C_COMPILER=" + sys_cc + " -DCMAKE_CXX_COMPILER=" + sys_cxx;
+
+    // Auto-fix known incompatibilities in cooking recipes
     auto recipe_file = src_path / "cooking_recipe.cmake";
     if (fs::exists(recipe_file)) {
-      std::string patch_cmd = "sed -i "
-                              "'s|https://gmplib.org/download/gmp/|https://"
-                              "ftp.gnu.org/gnu/gmp/|g' " +
-                              recipe_file.string() + " 2>/dev/null";
-      std::system(patch_cmd.c_str());
+      // Fix broken download URLs (use mirrors for unreachable hosts)
+      std::string patch_urls = "sed -i "
+                               "'s|https://gmplib.org/download/gmp/|https://ftp.gnu.org/gnu/gmp/|g' " +
+                               recipe_file.string() + " 2>/dev/null";
+      std::system(patch_urls.c_str());
 
-      // If using clang with libc++, patch Boost's bootstrap to use it
-      // The issue: bootstrap.sh uses system c++ which links against GCC's
-      // libstdc++ Fix: set CXX and CXXFLAGS before bootstrap.sh runs via
-      // PATCH_COMMAND
-      auto toml = project_root_ / "cpm.toml";
-      if (fs::exists(toml)) {
-        auto cfg = TomlParser::parse(toml);
-        auto spec = Toolchain::parse_compiler(cfg.compiler);
-        if (spec.pinned && spec.type == "clang") {
-          Toolchain tc(local_cpm_dir_);
-          std::string cxx = tc.get_cxx(spec);
-          auto tc_dir =
-              local_cpm_dir_ / "toolchain" / ("clang-" + spec.version);
-          auto lib_path = tc_dir / "lib" / "x86_64-unknown-linux-gnu";
+      // Auto-upgrade old deps if system compiler is too new
+      std::string gcc_ver = Config::get_compiler_version();
+      int gcc_major = 0;
+      try { gcc_major = std::stoi(gcc_ver); } catch (...) {}
 
-          // Patch the recipe to add --with-toolset=clang and set env for
-          // bootstrap
-          std::string patch_boost = "sed -i 's|./bootstrap.sh|"
-                                    "env CXX=" +
-                                    cxx +
-                                    " "
-                                    "CXXFLAGS=-stdlib=libc++ "
-                                    "LDFLAGS=\"-stdlib=libc++ -L" +
-                                    lib_path.string() + " -Wl,-rpath," +
-                                    lib_path.string() +
-                                    "\" "
-                                    "./bootstrap.sh|g' " +
-                                    recipe_file.string() + " 2>/dev/null";
-          std::system(patch_boost.c_str());
+      if (gcc_major >= 14) {
+        // Remove hash checks but preserve closing parens and other syntax
+        // Match: URL_HASH SHA256=hexvalue OR URL_MD5 hexvalue
+        // Replace just the hash directive, keeping anything after (like closing paren)
+        std::string remove_hashes =
+            "sed -i 's/URL_HASH SHA256=[a-f0-9A-F]*/DOWNLOAD_NO_EXTRACT FALSE/g; "
+            "s/URL_MD5 [a-f0-9A-F]*/DOWNLOAD_NO_EXTRACT FALSE/g' " +
+            recipe_file.string() + " 2>/dev/null";
+        std::system(remove_hashes.c_str());
 
-          // Also ensure b2 uses libc++ via cxxflags in the jam config
-          std::string patch_cxxflags =
-              "sed -i 's|<cxxflags>-std=c++|<cxxflags>-stdlib=libc++ "
-              "<cxxflags>-std=c++|g' " +
+        // Upgrade Boost (1.81 doesn't work with GCC 14+)
+        std::string patch_boost =
+            "sed -i 's|boost.io/release/1\\.8[0-3]\\.[0-9]/source/boost_1_8[0-3]_[0-9]|boost.io/release/1.86.0/source/boost_1_86_0|g' " +
+            recipe_file.string() + " 2>/dev/null";
+        std::system(patch_boost.c_str());
+
+        // Upgrade GMP (6.1.x doesn't work with GCC 14+)
+        std::string patch_gmp =
+            "sed -i 's|gmp/gmp-6\\.[0-2]\\.[0-9]|gmp/gmp-6.3.0|g' " +
+            recipe_file.string() + " 2>/dev/null && " +
+            // GMP configure fails with GCC 16 due to strict C23 defaults
+            // Add CFLAGS=-std=gnu11 to make its configure tests pass
+            "sed -i 's|<SOURCE_DIR>/configure --prefix=<INSTALL_DIR> --srcdir=<SOURCE_DIR>|"
+            "env CFLAGS=-std=gnu11 <SOURCE_DIR>/configure --prefix=<INSTALL_DIR> --srcdir=<SOURCE_DIR>|g' " +
+            recipe_file.string() + " 2>/dev/null";
+        std::system(patch_gmp.c_str());
+
+        // Upgrade nettle if present (old versions incompatible with new GMP)
+        std::string patch_nettle =
+            "sed -i 's|nettle/nettle-3\\.[0-7]\\(\\.[0-9]\\)\\?|nettle/nettle-3.10|g' " +
+            recipe_file.string() + " 2>/dev/null";
+        std::system(patch_nettle.c_str());
+
+        // Disable DPDK if python-pyelftools not available (DPDK is optional for Seastar)
+        if (std::system("python3 -c 'import elftools' > /dev/null 2>&1") != 0) {
+          std::string disable_dpdk =
+              "sed -i '/cooking_ingredient.*dpdk/,/^)/s/^/#/' " +
               recipe_file.string() + " 2>/dev/null";
-          std::system(patch_cxxflags.c_str());
-
-          // Set boost_toolset to clang
-          std::string patch_toolset =
-              "sed -i 's|set(boost_toolset \"cook_cxx\")|set(boost_toolset "
-              "\"clang\")|g' " +
-              recipe_file.string() + " 2>/dev/null";
-          std::system(patch_toolset.c_str());
+          std::system(disable_dpdk.c_str());
+          std::cout << "[cpm]   → disabled DPDK (python-pyelftools not available)\n";
         }
+
+        // Install python deps into .cpm if needed for any remaining builds
+        auto pip_target = bin_dir.parent_path() / "python";
+        if (!fs::exists(pip_target / "elftools")) {
+          std::string pip_cmd = "pip install --target=" + pip_target.string() +
+                                " pyelftools > /dev/null 2>&1";
+          std::system(pip_cmd.c_str());
+          if (fs::exists(pip_target / "elftools")) {
+            compiler_env += "export PYTHONPATH=\"" + pip_target.string() + ":$PYTHONPATH\" && ";
+          }
+        } else {
+          compiler_env += "export PYTHONPATH=\"" + pip_target.string() + ":$PYTHONPATH\" && ";
+        }
+
+        std::cout << "[cpm]   → auto-upgraded deps (compatible with GCC " << gcc_major << ")\n";
       }
     }
 
@@ -535,6 +688,14 @@ bool PackageManager::build_from_source(
     }
 
     std::cout << "[cpm]   → cooking.sh failed, trying other methods...\n";
+    std::cerr << "[cpm]\n";
+    std::cerr << "[cpm] If the build failed due to compiler incompatibility, try:\n";
+    std::cerr << "[cpm]   1. Add 'compiler = \"gcc-13\"' to [project] in cpm.toml\n";
+    std::cerr << "[cpm]   2. Install it:\n";
+    std::cerr << "[cpm]      Arch: sudo pacman -S gcc13\n";
+    std::cerr << "[cpm]      Ubuntu: sudo apt install g++-13\n";
+    std::cerr << "[cpm]      Fedora: sudo dnf install gcc-c++-13\n";
+    std::cerr << "[cpm]\n";
     ret = -1;
   }
 
@@ -789,6 +950,16 @@ void PackageManager::install_built_library(
       }
     }
   }
+
+  // Copy defines.txt if present (compile flags needed by this library)
+  auto src_defines = built_path / "defines.txt";
+  auto dst_defines = local_cpm_dir_ / "defines.txt";
+  if (fs::exists(src_defines)) {
+    // Append to existing defines (multiple packages may have defines)
+    std::ifstream in(src_defines);
+    std::ofstream out(dst_defines, std::ios::app);
+    out << in.rdbuf();
+  }
 }
 
 void PackageManager::resolve_transitive_deps(
@@ -1003,141 +1174,36 @@ PackageManager::search_github_repo(const std::string &package_name) {
 void PackageManager::ensure_build_tools(const std::filesystem::path &bin_dir) {
   namespace fs = std::filesystem;
 
-  // Install stow if not available — build from source (works on any system)
   auto stow_path = bin_dir / "stow";
-  if (std::system("which stow > /dev/null 2>&1") != 0 &&
-      !fs::exists(stow_path)) {
+  if (std::system("which stow > /dev/null 2>&1") != 0 && !fs::exists(stow_path)) {
     std::cout << "[cpm]   → building stow from source...\n";
 
     auto stow_src = global_cache_dir_ / "tool-stow-src";
     if (!fs::exists(stow_src)) {
       std::string cmd = "git clone --depth 1 --quiet --branch v2.4.1 "
-                        "https://github.com/aspiers/stow " +
-                        stow_src.string() + " 2>/dev/null";
+                        "https://github.com/aspiers/stow " + stow_src.string() + " 2>/dev/null";
       std::system(cmd.c_str());
     }
 
-    if (fs::exists(stow_src / "bin" / "stow.in")) {
-      // stow is a Perl script + Perl module
-      // Build it properly with autotools into bin_dir's parent
-      auto tool_prefix = bin_dir.parent_path() / "tools" / "stow";
-      fs::create_directories(tool_prefix / "bin");
-      fs::create_directories(tool_prefix / "lib" / "perl5" / "Stow");
+    auto tool_prefix = bin_dir.parent_path() / "tools" / "stow";
+    fs::create_directories(tool_prefix);
 
-      // Try autoreconf + configure + make install
-      std::string build_cmd = "cd " + stow_src.string() +
-                              " && autoreconf -iv > /dev/null 2>&1"
-                              " && ./configure --prefix=" +
-                              tool_prefix.string() +
-                              " > /dev/null 2>&1"
-                              " && make install > /dev/null 2>&1";
+    // Build stow: remove -Werror from configure.ac, then autoreconf + configure + make install
+    std::string build_cmd =
+        "cd " + stow_src.string() +
+        " && sed -i 's/-Werror//g' configure.ac 2>/dev/null"
+        " && autoreconf -iv > /dev/null 2>&1"
+        " && ./configure --prefix=" + tool_prefix.string() + " > /dev/null 2>&1"
+        " && make install > /dev/null 2>&1";
 
-      int ret = std::system(build_cmd.c_str());
-      if (ret == 0 && fs::exists(tool_prefix / "bin" / "stow")) {
-        // Symlink into .cpm/bin/
-        fs::create_symlink(tool_prefix / "bin" / "stow", stow_path);
-        // Also symlink chkstow
-        auto chkstow = tool_prefix / "bin" / "chkstow";
-        if (fs::exists(chkstow)) {
-          fs::create_symlink(chkstow, bin_dir / "chkstow");
-        }
-      } else {
-        // Fallback: create minimal stow script manually
-        // This works because stow is just a Perl script
-        std::string perl_path = "/usr/bin/perl";
-        auto stow_in = stow_src / "bin" / "stow.in";
-        auto util_in = stow_src / "lib" / "Stow" / "Util.pm.in";
-
-        if (fs::exists(stow_in)) {
-          auto lib_dir = bin_dir.parent_path() / "tools" / "stow" / "lib";
-          fs::create_directories(lib_dir / "Stow");
-
-          // Read and patch stow.in
-          std::ifstream in(stow_in);
-          std::string content((std::istreambuf_iterator<char>(in)),
-                              std::istreambuf_iterator<char>());
-          in.close();
-
-          auto replace_all = [](std::string &s, const std::string &from,
-                                const std::string &to) {
-            size_t pos = 0;
-            while ((pos = s.find(from, pos)) != std::string::npos) {
-              s.replace(pos, from.length(), to);
-              pos += to.length();
-            }
-          };
-
-          replace_all(content, "@PERL@", perl_path);
-          replace_all(content, "@VERSION@", "2.4.1");
-          replace_all(content, "@PERL5LIB@", lib_dir.string());
-
-          // Write stow script
-          std::ofstream out(stow_path);
-          out << content;
-          out.close();
-          fs::permissions(stow_path,
-                          fs::perms::owner_all | fs::perms::group_read |
-                              fs::perms::group_exec | fs::perms::others_read |
-                              fs::perms::others_exec);
-
-          // Patch and copy Util.pm
-          if (fs::exists(util_in)) {
-            std::ifstream uin(util_in);
-            std::string ucontent((std::istreambuf_iterator<char>(uin)),
-                                 std::istreambuf_iterator<char>());
-            uin.close();
-            replace_all(ucontent, "@VERSION@", "2.4.1");
-            std::ofstream uout(lib_dir / "Stow" / "Util.pm");
-            uout << ucontent;
-            uout.close();
-          }
-
-          // Copy Stow.pm if exists
-          auto stow_pm = stow_src / "lib" / "Stow.pm";
-          if (fs::exists(stow_pm)) {
-            fs::copy(stow_pm, lib_dir / "Stow.pm",
-                     fs::copy_options::overwrite_existing);
-          }
-
-          // Set PERL5LIB in a wrapper
-          auto wrapper = bin_dir / "stow-wrapper";
-          std::ofstream w(stow_path);
-          w << "#!/bin/bash\n";
-          w << "export PERL5LIB=\"" << lib_dir.string() << ":$PERL5LIB\"\n";
-          w << "exec " << perl_path << " "
-            << (bin_dir.parent_path() / "tools" / "stow" / "bin" / "stow-real")
-                   .string()
-            << " \"$@\"\n";
-          w.close();
-
-          // Actually, just do it simpler — inline perl5lib in the script itself
-          // Re-read and add use lib line
-          std::ifstream re_in(stow_path);
-          std::string script((std::istreambuf_iterator<char>(re_in)),
-                             std::istreambuf_iterator<char>());
-          re_in.close();
-
-          // Add use lib after shebang
-          auto newline_pos = script.find('\n');
-          if (newline_pos != std::string::npos) {
-            script.insert(newline_pos + 1,
-                          "use lib '" + lib_dir.string() + "';\n");
-          }
-
-          std::ofstream final_out(stow_path);
-          final_out << script;
-          final_out.close();
-          fs::permissions(stow_path,
-                          fs::perms::owner_all | fs::perms::group_read |
-                              fs::perms::group_exec | fs::perms::others_read |
-                              fs::perms::others_exec);
-        }
-      }
+    int ret = std::system(build_cmd.c_str());
+    if (ret == 0 && fs::exists(tool_prefix / "bin" / "stow")) {
+      if (fs::exists(stow_path) || fs::is_symlink(stow_path)) fs::remove(stow_path);
+      fs::create_symlink(tool_prefix / "bin" / "stow", stow_path);
+    } else {
+      std::cerr << "[cpm] WARNING: Could not build stow. Some packages may fail to install.\n";
     }
   }
-
-  // Ragel — skip for now, most projects have pre-generated .cc files
-  // If needed in future, we'd build colm first then ragel (complex chain)
 }
 
 void PackageManager::export_package_headers() {
@@ -1466,6 +1532,27 @@ PackageManager::build_compile_command(const ProjectConfig &config) const {
   auto include_dir = local_cpm_dir_ / "include";
   if (std::filesystem::exists(include_dir)) {
     cmd << " -I" << include_dir.string();
+  }
+
+  // Read compile defines from .cpm/defines.txt (set by packages that need them)
+  auto defines_file = local_cpm_dir_ / "defines.txt";
+  if (!std::filesystem::exists(defines_file)) {
+    // Also check in built cache
+    defines_file = global_cache_dir_;
+    // Search for any defines.txt in lib or include parents
+    for (const auto& entry : std::filesystem::directory_iterator(local_cpm_dir_)) {
+      auto df = entry.path() / "defines.txt";
+      if (std::filesystem::exists(df)) { defines_file = df; break; }
+    }
+  }
+  if (std::filesystem::exists(defines_file) && std::filesystem::is_regular_file(defines_file)) {
+    std::ifstream df(defines_file);
+    std::string define;
+    while (std::getline(df, define)) {
+      if (!define.empty() && define[0] == '-') {
+        cmd << " " << define;
+      }
+    }
   }
 
   // Source file

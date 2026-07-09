@@ -3,7 +3,6 @@
 #include <cstdlib>
 #include <array>
 #include <memory>
-#include <fstream>
 
 namespace cpm {
 
@@ -22,175 +21,105 @@ Toolchain::CompilerSpec Toolchain::parse_compiler(const std::string& spec) {
         return result;
     }
 
-    auto at_pos = spec.find('@');
+    // Support formats: "gcc-13", "gcc@13", "clang-17", "clang@17", "g++-13"
+    std::string s = spec;
+
+    // Normalize: gcc@13 → gcc-13
+    auto at_pos = s.find('@');
     if (at_pos != std::string::npos) {
-        result.type = spec.substr(0, at_pos);
-        result.version = spec.substr(at_pos + 1);
-        result.pinned = true;
-    } else {
-        result.type = spec;
-        result.version = "";
+        s[at_pos] = '-';
     }
 
+    auto dash_pos = s.rfind('-');
+    if (dash_pos != std::string::npos && dash_pos > 0) {
+        std::string maybe_version = s.substr(dash_pos + 1);
+        // Check if it's a number
+        bool is_num = !maybe_version.empty();
+        for (char c : maybe_version) {
+            if (!std::isdigit(c) && c != '.') { is_num = false; break; }
+        }
+
+        if (is_num) {
+            result.type = s.substr(0, dash_pos);
+            result.version = maybe_version;
+            result.pinned = true;
+            // Normalize type
+            if (result.type == "g++") result.type = "gcc";
+            if (result.type == "clang++") result.type = "clang";
+            return result;
+        }
+    }
+
+    // No version specified
+    result.type = s;
+    if (result.type == "g++") result.type = "gcc";
+    if (result.type == "clang++") result.type = "clang";
     return result;
 }
 
 std::string Toolchain::get_cc(const CompilerSpec& spec) {
-    if (!spec.pinned) {
-        return (spec.type == "clang") ? "clang" : "gcc";
+    if (spec.pinned) {
+        if (spec.type == "clang") return "clang-" + spec.version;
+        return "gcc-" + spec.version;
     }
-
-    auto bin_dir = toolchain_dir_ / (spec.type + "-" + spec.version) / "bin";
-    if (spec.type == "clang") {
-        auto path = bin_dir / "clang";
-        if (std::filesystem::exists(path)) return path.string();
-    } else {
-        auto path = bin_dir / "gcc";
-        if (std::filesystem::exists(path)) return path.string();
-    }
-
-    // Fallback to system versioned binary
-    std::string versioned = spec.type + "-" + spec.version;
-    std::string check = "which " + versioned + " > /dev/null 2>&1";
-    if (std::system(check.c_str()) == 0) return versioned;
-
     return (spec.type == "clang") ? "clang" : "gcc";
 }
 
 std::string Toolchain::get_cxx(const CompilerSpec& spec) {
-    if (!spec.pinned) {
-        return (spec.type == "clang") ? "clang++" : "g++";
+    if (spec.pinned) {
+        if (spec.type == "clang") return "clang++-" + spec.version;
+        return "g++-" + spec.version;
     }
-
-    auto bin_dir = toolchain_dir_ / (spec.type + "-" + spec.version) / "bin";
-    if (spec.type == "clang") {
-        auto path = bin_dir / "clang++";
-        if (std::filesystem::exists(path)) return path.string();
-    } else {
-        auto path = bin_dir / "g++";
-        if (std::filesystem::exists(path)) return path.string();
-    }
-
-    // Fallback to system versioned binary
-    if (spec.type == "clang") {
-        std::string versioned = "clang++-" + spec.version;
-        std::string check = "which " + versioned + " > /dev/null 2>&1";
-        if (std::system(check.c_str()) == 0) return versioned;
-    } else {
-        std::string versioned = "g++-" + spec.version;
-        std::string check = "which " + versioned + " > /dev/null 2>&1";
-        if (std::system(check.c_str()) == 0) return versioned;
-    }
-
     return (spec.type == "clang") ? "clang++" : "g++";
 }
 
 std::string Toolchain::ensure_compiler(const CompilerSpec& spec) {
-    if (!spec.pinned) {
-        return get_cxx(spec);
-    }
+    std::string cxx = get_cxx(spec);
 
-    // Check if already downloaded
-    auto tc_dir = toolchain_dir_ / (spec.type + "-" + spec.version);
-    if (std::filesystem::exists(tc_dir / "bin")) {
-        return get_cxx(spec);
-    }
-
-    // Check if system has the versioned compiler
-    std::string versioned_cxx = (spec.type == "clang") ?
-        "clang++-" + spec.version : "g++-" + spec.version;
-    std::string check = "which " + versioned_cxx + " > /dev/null 2>&1";
+    // Check if the compiler exists on the system
+    std::string check = "which " + cxx + " > /dev/null 2>&1";
     if (std::system(check.c_str()) == 0) {
-        return versioned_cxx;
+        return cxx;
     }
 
-    // Download prebuilt toolchain
-    std::cout << "[cpm] Downloading " << spec.type << " " << spec.version << " toolchain...\n";
-    std::filesystem::create_directories(tc_dir);
-
-    bool ok = false;
-    if (spec.type == "clang") {
-        ok = download_clang(spec.version);
+    // Compiler not found — show helpful message
+    std::cerr << "[cpm] ERROR: Compiler '" << cxx << "' not found on your system.\n";
+    std::cerr << "[cpm]\n";
+    std::cerr << "[cpm] Install it:\n";
+    std::cerr << "[cpm]   Arch Linux:   sudo pacman -S " << spec.type << spec.version << "\n";
+    std::cerr << "[cpm]   Ubuntu/Debian: sudo apt install ";
+    if (spec.type == "gcc") {
+        std::cerr << "g++-" << spec.version << "\n";
     } else {
-        ok = download_gcc(spec.version);
+        std::cerr << "clang-" << spec.version << "\n";
     }
-
-    if (ok) {
-        std::cout << "[cpm] Toolchain ready: " << spec.type << " " << spec.version << "\n";
-        return get_cxx(spec);
+    std::cerr << "[cpm]   Fedora:       sudo dnf install ";
+    if (spec.type == "gcc") {
+        std::cerr << "gcc-c++-" << spec.version << "\n";
+    } else {
+        std::cerr << "clang-" << spec.version << "\n";
     }
+    std::cerr << "[cpm]\n";
+    std::cerr << "[cpm] Or change 'compiler' in cpm.toml to use your system compiler.\n";
+    std::cerr << "[cpm] Available compilers on this system:\n";
 
-    std::cerr << "[cpm] WARNING: Could not download " << spec.type << " " << spec.version
-              << ", using system compiler\n";
+    // List what's available
+    std::system("ls /usr/bin/g++* /usr/bin/clang++* 2>/dev/null | sed 's|/usr/bin/||' | sed 's/^/[cpm]   /'");
+
+    // Fallback to system default
+    std::cerr << "[cpm]\n";
+    std::cerr << "[cpm] Falling back to system default compiler.\n";
     return (spec.type == "clang") ? "clang++" : "g++";
 }
 
 std::string Toolchain::get_path_prefix() {
-    if (!std::filesystem::exists(toolchain_dir_)) return "";
-
-    std::string path;
-    for (const auto& entry : std::filesystem::directory_iterator(toolchain_dir_)) {
-        if (entry.is_directory()) {
-            auto bin = entry.path() / "bin";
-            if (std::filesystem::exists(bin)) {
-                if (!path.empty()) path += ":";
-                path += bin.string();
-            }
-        }
-    }
-    return path;
+    return ""; // No special path needed — using system compilers
 }
 
-std::string Toolchain::get_gcc_url(const std::string& version) {
-    // GCC doesn't have official prebuilt binaries for Linux.
-    // Use a known working mirror or fallback to clang.
-    // For now, try the Ubuntu PPA style archives
-    return "https://kayari.org/gcc-builds/downloads/gcc-" +
-           version + ".1.0-aarch64-linux.tar.xz";  // This likely won't work for x86_64
-}
-
-std::string Toolchain::get_clang_url(const std::string& version) {
-    // Official LLVM releases — these WORK reliably
-    return "https://github.com/llvm/llvm-project/releases/download/llvmorg-" +
-           version + ".0.6/clang+llvm-" + version +
-           ".0.6-x86_64-linux-gnu-ubuntu-22.04.tar.xz";
-}
-
-bool Toolchain::download_gcc(const std::string& version) {
-    auto tc_dir = toolchain_dir_ / ("gcc-" + version);
-    auto url = get_gcc_url(version);
-
-    std::string download_cmd =
-        "curl -fSL --progress-bar '" + url + "' -o /tmp/cpm-gcc.tar.xz 2>&1"
-        " && mkdir -p " + tc_dir.string() +
-        " && tar -xf /tmp/cpm-gcc.tar.xz -C " + tc_dir.string() + " --strip-components=1"
-        " && rm /tmp/cpm-gcc.tar.xz";
-
-    int ret = std::system(download_cmd.c_str());
-    if (ret != 0) {
-        // Fallback: try to compile from source (last resort, very slow)
-        std::cerr << "[cpm] Prebuilt GCC " << version << " not available for this platform\n";
-        return false;
-    }
-    return true;
-}
-
-bool Toolchain::download_clang(const std::string& version) {
-    auto tc_dir = toolchain_dir_ / ("clang-" + version);
-    auto url = get_clang_url(version);
-
-    std::string download_cmd =
-        "curl -fSL --progress-bar '" + url + "' -o /tmp/cpm-clang.tar.xz 2>&1"
-        " && mkdir -p " + tc_dir.string() +
-        " && tar -xf /tmp/cpm-clang.tar.xz -C " + tc_dir.string() + " --strip-components=1"
-        " && rm /tmp/cpm-clang.tar.xz";
-
-    int ret = std::system(download_cmd.c_str());
-    if (ret != 0) {
-        std::cerr << "[cpm] Prebuilt Clang " << version << " not available for this platform\n";
-        return false;
-    }
-    return true;
-}
+// Not used — we use system compilers
+std::string Toolchain::get_gcc_url(const std::string&) { return ""; }
+std::string Toolchain::get_clang_url(const std::string&) { return ""; }
+bool Toolchain::download_gcc(const std::string&) { return false; }
+bool Toolchain::download_clang(const std::string&) { return false; }
 
 } // namespace cpm
