@@ -22,7 +22,7 @@ bool NixEnv::available() const {
 std::string NixEnv::run_cmd(const std::string& cmd) {
     std::array<char, 4096> buffer;
     std::string result;
-    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd.c_str(), "r"), pclose);
+    auto pipe = std::unique_ptr<FILE, int(*)(FILE*)>(popen(cmd.c_str(), "r"), pclose);
     if (!pipe) return "";
     while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
         result += buffer.data();

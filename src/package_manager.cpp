@@ -103,7 +103,7 @@ std::string PackageManager::resolve_latest_tag(const std::string &github_url,
       " 2>/dev/null | grep -v '\\^{}' | head -1 | sed 's/.*refs\\/tags\\///'";
   std::array<char, 256> buffer;
   std::string latest_tag;
-  std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(tag_cmd.c_str(), "r"),
+  auto pipe = std::unique_ptr<FILE, int(*)(FILE*)>(popen(tag_cmd.c_str(), "r"),
                                                 pclose);
   if (pipe) {
     while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
@@ -1155,7 +1155,7 @@ PackageManager::search_github_repo(const std::string &package_name) {
 
   std::array<char, 512> buffer;
   std::string result;
-  std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(search_cmd.c_str(), "r"),
+  auto pipe = std::unique_ptr<FILE, int(*)(FILE*)>(popen(search_cmd.c_str(), "r"),
                                                 pclose);
   if (pipe) {
     while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
@@ -1646,8 +1646,10 @@ PackageManager::build_compile_command(const ProjectConfig &config) const {
     // Add common system libs that compiled deps often need
     cmd << " -lz -lpthread -ldl -lrt -latomic";
 
-    // When linking seastar or complex libs, add their transitive deps
-    // These are available in nix-shell PATH at link time
+    // If linking against nix-provided shared libs (seastar etc.),
+    // use pkg-config or link what the library needs.
+    // Auto-detect: if libseastar.a exists, it needs these runtime deps
+    // which are provided by nix-shell at link time.
     if (std::filesystem::exists(lib_dir / "libseastar.a")) {
       cmd << " -lfmt -lboost_program_options -lboost_thread -lboost_filesystem -lboost_chrono";
       cmd << " -lyaml-cpp -lhwloc -lgnutls -luring -lnuma -lcares -lprotobuf -lsctp";

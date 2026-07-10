@@ -13,7 +13,7 @@ namespace cpm {
 static std::string exec_command(const std::string& cmd) {
     std::array<char, 256> buffer;
     std::string result;
-    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd.c_str(), "r"), pclose);
+    auto pipe = std::unique_ptr<FILE, int(*)(FILE*)>(popen(cmd.c_str(), "r"), pclose);
     if (!pipe) return "";
     while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
         result += buffer.data();
