@@ -4,7 +4,7 @@ A fast, isolated package manager for C and C++ projects. Like `uv` for Python, b
 
 ```bash
 # Install
-curl -fsSL https://raw.githubusercontent.com/user/cpm/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Rana718/cpm/main/install.sh | bash
 ```
 
 ## Features
@@ -40,7 +40,7 @@ cpm run
 ### One-line install (any Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/user/cpm/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Rana718/cpm/main/install.sh | bash
 ```
 
 This installs:
@@ -51,7 +51,7 @@ This installs:
 ### Manual install
 
 ```bash
-git clone https://github.com/user/cpm.git
+git clone https://github.com/Rana718/cpm.git
 cd cpm
 ./install.sh
 ```
@@ -59,7 +59,7 @@ cd cpm
 ### From source (development)
 
 ```bash
-git clone https://github.com/user/cpm.git
+git clone https://github.com/Rana718/cpm.git
 cd cpm
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
@@ -179,7 +179,6 @@ Copy `dist/` to any Linux server and run:
 - `nix` (auto-installed by `install.sh`)
 
 ## Development
-
 ```bash
 # Build
 task
@@ -199,4 +198,4 @@ task clean
 
 ## License
 
-MIT
+[MIT](LICENSE)

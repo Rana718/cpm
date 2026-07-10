@@ -4,7 +4,7 @@ set -e
 
 VERSION="0.1.0"
 INSTALL_DIR="/usr/local/bin"
-CPM_REPO="https://github.com/user/cpm"  # TODO: update with actual repo
+CPM_REPO="https://github.com/Rana718/cpm"  # TODO: update with actual repo
 
 echo ""
 echo "  ██████╗██████╗ ███╗   ███╗"
