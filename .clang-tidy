@@ -1,15 +1,25 @@
 Checks: >
   -*,
   bugprone-*,
+  -bugprone-command-processor,
+  -bugprone-branch-clone,
   -bugprone-easily-swappable-parameters,
   -bugprone-narrowing-conversions,
+  -bugprone-empty-catch,
+  -bugprone-unused-local-non-trivial-variable,
   modernize-*,
   -modernize-use-trailing-return-type,
   -modernize-avoid-c-arrays,
   performance-*,
   readability-identifier-naming,
   readability-redundant-*,
-  misc-unused-using-decls
+  misc-unused-using-decls,
+  -misc-include-cleaner,
+  -performance-enum-size,
+  -performance-inefficient-string-concatenation,
+  -modernize-return-braced-init-list,
+  clang-analyzer-deadcode.DeadStores,
+  -clang-diagnostic-unused-variable
 
 CheckOptions:
   - key: readability-identifier-naming.ClassCase
@@ -27,3 +37,4 @@ CheckOptions:
 
 WarningsAsErrors: ''
 HeaderFilterRegex: 'include/cpm/.*'
+FormatStyle: file

@@ -1,11 +1,12 @@
-#include "cpm/package_manager.hpp"
 #include "cpm/config.hpp"
 #include "cpm/nix_env.hpp"
+#include "cpm/package_manager.hpp"
+
+#include <cstdlib>
+#include <exception>
+#include <filesystem>
 #include <iostream>
 #include <string>
-#include <cstdlib>
-#include <filesystem>
-#include <vector>
 
 void print_usage() {
     std::cout << R"(
@@ -15,7 +16,7 @@ void print_usage() {
  ██║     ██╔═══╝ ██║╚██╔╝██║
  ╚██████╗██║     ██║ ╚═╝ ██║
   ╚═════╝╚═╝     ╚═╝     ╚═╝
-  C/C++ Package Manager v0.1.0
+  C/C++ Package Manager v" CPM_VERSION "
 
 USAGE:
     cpm <command> [args]
@@ -53,7 +54,7 @@ void print_info() {
     std::cout << "  Global Cache: " << cpm::Config::get_global_cache_dir().string() << "\n";
 }
 
-int main(int argc, char* argv[]) {
+int main(int argc, char *argv[]) {
     if (argc < 2) {
         print_usage();
         return 0;
@@ -69,62 +70,53 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             pm.init(argv[2]);
-        }
-        else if (command == "run") {
+        } else if (command == "run") {
             return pm.run();
-        }
-        else if (command == "build") {
+        } else if (command == "build") {
             bool static_build = (argc >= 3 && std::string(argv[2]) == "-s");
             return pm.build(static_build);
-        }
-        else if (command == "start") {
+        } else if (command == "start") {
             return pm.start();
-        }
-        else if (command == "install") {
+        } else if (command == "install") {
             pm.install();
-        }
-        else if (command == "add") {
+        } else if (command == "add") {
             if (argc < 3) {
                 std::cerr << "[cpm] ERROR: cpm add github:user/repo@version\n";
                 return 1;
             }
             pm.install_package(argv[2]);
-        }
-        else if (command == "remove" || command == "rm") {
+        } else if (command == "remove" || command == "rm") {
             if (argc < 3) {
                 std::cerr << "[cpm] ERROR: cpm remove <name>\n";
                 return 1;
             }
             pm.remove_package(argv[2]);
-        }
-        else if (command == "update") {
+        } else if (command == "update") {
             pm.update();
-        }
-        else if (command == "list" || command == "ls") {
+        } else if (command == "list" || command == "ls") {
             pm.list();
-        }
-        else if (command == "info") {
+        } else if (command == "info") {
             print_info();
-        }
-        else if (command == "setup") {
+        } else if (command == "setup") {
             // Setup nix backend for fast pre-built packages
             cpm::NixEnv nix(std::filesystem::current_path() / ".cpm", std::filesystem::path(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") / ".cpm" / "cache");
             if (nix.available()) {
                 std::cout << "[cpm] Nix is already installed and ready.\n";
             } else {
-                std::system("curl --proto =https --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install --no-confirm 2>&1");
+                std::system("curl --proto =https --tlsv1.2 -sSf -L "
+                            "https://install.determinate.systems/nix | sh -s -- "
+                            "install --no-confirm 2>&1");
             }
-        }
-        else if (command == "--help" || command == "-h" || command == "help") {
+        } else if (command == "--help" || command == "-h" || command == "help") {
             print_usage();
-        }
-        else {
+        } else if (command == "--version" || command == "-v" || command == "version") {
+            std::cout << "cpm " << CPM_VERSION << "\n";
+        } else {
             std::cerr << "[cpm] Unknown command: " << command << "\n";
             std::cerr << "[cpm] Run 'cpm help' for usage.\n";
             return 1;
         }
-    }
-    catch (const std::exception& e) {
+    } catch (const std::exception &e) {
         std::cerr << "[cpm] FATAL: " << e.what() << "\n";
         return 1;
     }

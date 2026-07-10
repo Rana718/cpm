@@ -1,17 +1,21 @@
 #include "cpm/toml_parser.hpp"
+
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
+#include <string>
+#include <utility>
 
 namespace cpm {
 
-std::string TomlParser::trim(const std::string& str) {
+std::string TomlParser::trim(const std::string &str) {
     auto start = str.find_first_not_of(" \t\r\n");
     auto end = str.find_last_not_of(" \t\r\n");
     if (start == std::string::npos) return "";
     return str.substr(start, end - start + 1);
 }
 
-std::pair<std::string, std::string> TomlParser::parse_key_value(const std::string& line) {
+std::pair<std::string, std::string> TomlParser::parse_key_value(const std::string &line) {
     auto eq_pos = line.find('=');
     if (eq_pos == std::string::npos) return {"", ""};
 
@@ -25,7 +29,7 @@ std::pair<std::string, std::string> TomlParser::parse_key_value(const std::strin
     return {key, value};
 }
 
-ProjectConfig TomlParser::parse(const std::filesystem::path& toml_path) {
+ProjectConfig TomlParser::parse(const std::filesystem::path &toml_path) {
     std::ifstream file(toml_path);
     if (!file.is_open()) {
         throw std::runtime_error("Cannot open " + toml_path.string());
@@ -52,21 +56,27 @@ ProjectConfig TomlParser::parse(const std::filesystem::path& toml_path) {
         if (key.empty()) continue;
 
         if (current_section == "project") {
-            if (key == "name") config.name = value;
-            else if (key == "version") config.version = value;
-            else if (key == "description") config.description = value;
-            else if (key == "cpp_standard") config.cpp_standard = value;
-            else if (key == "compiler") config.compiler = value;
-            else if (key == "entry") config.entry = value;
-            else if (key == "output") config.output = value;
-        }
-        else if (current_section == "dependencies") {
+            if (key == "name")
+                config.name = value;
+            else if (key == "version")
+                config.version = value;
+            else if (key == "description")
+                config.description = value;
+            else if (key == "cpp_standard")
+                config.cpp_standard = value;
+            else if (key == "compiler")
+                config.compiler = value;
+            else if (key == "entry")
+                config.entry = value;
+            else if (key == "output")
+                config.output = value;
+        } else if (current_section == "dependencies") {
             // Header-only packages: name = "github:user/repo@version"
             GitDependency dep;
             dep.name = key;
 
             std::string url = value;
-            if (url.find("github:") == 0) {
+            if (url.starts_with("github:")) {
                 url = url.substr(7);
             }
 
@@ -80,15 +90,14 @@ ProjectConfig TomlParser::parse(const std::filesystem::path& toml_path) {
             }
 
             config.git_dependencies.push_back(dep);
-        }
-        else if (current_section == "system-dependencies") {
+        } else if (current_section == "system-dependencies") {
             // Compiled libraries: name = "github:user/repo@version"
             // These get built from source inside .cpm/
             SystemDependency dep;
             dep.name = key;
 
             std::string url = value;
-            if (url.find("github:") == 0) {
+            if (url.starts_with("github:")) {
                 url = url.substr(7);
             }
 
@@ -102,8 +111,7 @@ ProjectConfig TomlParser::parse(const std::filesystem::path& toml_path) {
             }
 
             config.system_dependencies.push_back(dep);
-        }
-        else if (current_section == "scripts") {
+        } else if (current_section == "scripts") {
             if (key == "start") config.start_script = value;
         }
     }
@@ -114,7 +122,7 @@ ProjectConfig TomlParser::parse(const std::filesystem::path& toml_path) {
     return config;
 }
 
-void TomlParser::create_default(const std::filesystem::path& toml_path, const std::string& project_name) {
+void TomlParser::create_default(const std::filesystem::path &toml_path, const std::string &project_name) {
     std::ofstream file(toml_path);
     if (!file.is_open()) {
         throw std::runtime_error("Cannot create " + toml_path.string());

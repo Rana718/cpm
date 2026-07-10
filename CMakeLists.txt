@@ -5,6 +5,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Pass version to source code
+add_compile_definitions(CPM_VERSION="${PROJECT_VERSION}")
+
 # Source files
 file(GLOB_RECURSE CPM_SOURCES "src/*.cpp")
 

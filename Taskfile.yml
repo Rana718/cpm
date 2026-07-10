@@ -1,0 +1,74 @@
+version: "3"
+
+vars:
+   SRC_FILES:
+      sh: find src include -name '*.cpp' -o -name '*.hpp' | tr '\n' ' '
+   BUILD_DIR: build
+   INSTALL_PREFIX: /usr/local
+
+tasks:
+   default:
+      desc: Build cpm
+      cmds:
+         - mkdir -p {{.BUILD_DIR}}
+         - cd {{.BUILD_DIR}} && cmake .. -DCMAKE_BUILD_TYPE=Release 
+         - cd {{.BUILD_DIR}} && cmake --build . -j$(nproc)
+
+   fmt:
+      desc: Format all source files with clang-format
+      cmds:
+         - clang-format -i {{.SRC_FILES}}
+         - echo "[task] Formatted all files"
+
+   fmt:check:
+      desc: Check formatting without modifying files
+      cmds:
+         - clang-format --dry-run --Werror {{.SRC_FILES}}
+
+   lint:
+      desc: Run clang-tidy linting
+      cmds:
+         - task: default
+         - clang-tidy {{.SRC_FILES}} -p {{.BUILD_DIR}} --fix --fix-errors
+         - echo "[task] Lint complete"
+
+   lint:check:
+      desc: Run clang-tidy without fixing
+      cmds:
+         - task: default
+         - clang-tidy {{.SRC_FILES}} -p {{.BUILD_DIR}}
+
+   fix:
+      desc: Fix formatting + lint issues + remove unused variables/imports
+      cmds:
+         - task: fmt
+         - task: lint
+         - echo "[task] All fixes applied"
+
+   install:
+      desc: Build and install cpm to system (/usr/local/bin)
+      cmds:
+         - task: default
+         - sudo rm -f {{.INSTALL_PREFIX}}/bin/cpm
+         - sudo cp {{.BUILD_DIR}}/cpm {{.INSTALL_PREFIX}}/bin/cpm
+         - sudo chmod +x {{.INSTALL_PREFIX}}/bin/cpm
+         - echo "[task] Installed cpm $(cpm --version 2>/dev/null || echo 'v0.1.0')"
+         - echo "[task] Run 'cpm --version' to verify"
+
+   uninstall:
+      desc: Remove cpm from system
+      cmds:
+         - sudo rm -f {{.INSTALL_PREFIX}}/bin/cpm
+         - echo "[task] Removed cpm from {{.INSTALL_PREFIX}}/bin/"
+
+   clean:
+      desc: Remove build directory
+      cmds:
+         - rm -rf {{.BUILD_DIR}}
+         - echo "[task] Cleaned"
+
+   test:
+      desc: Run tests in testdir
+      dir: testdir
+      cmds:
+         - ../build/cpm run

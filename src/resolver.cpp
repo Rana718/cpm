@@ -1,14 +1,13 @@
 #include "cpm/resolver.hpp"
 
+#include <filesystem>
+#include <string>
+
 namespace cpm {
 
-Resolver::Resolver(const std::filesystem::path& project_root)
-    : project_root_(project_root)
-    , include_dir_(project_root / ".cpm" / "include")
-    , packages_dir_(project_root / ".cpm" / "packages")
-{}
+Resolver::Resolver(const std::filesystem::path &project_root) : project_root_(project_root), include_dir_(project_root / ".cpm" / "include"), packages_dir_(project_root / ".cpm" / "packages") {}
 
-std::filesystem::path Resolver::find_include_root(const std::filesystem::path& package_dir) const {
+std::filesystem::path Resolver::find_include_root(const std::filesystem::path &package_dir) const {
     namespace fs = std::filesystem;
 
     // Priority 1: has "include/" with subdirectories
@@ -27,7 +26,7 @@ std::filesystem::path Resolver::find_include_root(const std::filesystem::path& p
     // (i.e., src/App.h → include as <packagename/App.h>)
     auto src_dir = package_dir / "src";
     if (fs::exists(src_dir) && fs::is_directory(src_dir)) {
-        for (const auto& entry : fs::directory_iterator(src_dir)) {
+        for (const auto &entry : fs::directory_iterator(src_dir)) {
             if (entry.is_regular_file()) {
                 auto ext = entry.path().extension().string();
                 if (ext == ".h" || ext == ".hpp" || ext == ".hxx") {
@@ -41,7 +40,7 @@ std::filesystem::path Resolver::find_include_root(const std::filesystem::path& p
     return package_dir;
 }
 
-void Resolver::export_package(const std::string& package_name, const std::filesystem::path& package_dir) {
+void Resolver::export_package(const std::string &package_name, const std::filesystem::path &package_dir) {
     namespace fs = std::filesystem;
 
     auto include_root = find_include_root(package_dir);
@@ -50,7 +49,7 @@ void Resolver::export_package(const std::string& package_name, const std::filesy
     // e.g., include/nlohmann/ → symlink nlohmann/
     // vs src/App.h → needs to be wrapped as packagename/App.h
     bool has_subdir_structure = false;
-    for (const auto& entry : fs::directory_iterator(include_root)) {
+    for (const auto &entry : fs::directory_iterator(include_root)) {
         if (entry.is_directory()) {
             has_subdir_structure = true;
             break;
@@ -59,7 +58,7 @@ void Resolver::export_package(const std::string& package_name, const std::filesy
 
     if (has_subdir_structure && include_root.filename() != "src") {
         // Standard layout: include/nlohmann/json.hpp → symlink nlohmann/
-        for (const auto& entry : fs::directory_iterator(include_root)) {
+        for (const auto &entry : fs::directory_iterator(include_root)) {
             auto target_name = entry.path().filename();
             auto link_path = include_dir_ / target_name;
 
@@ -89,7 +88,7 @@ void Resolver::export_headers() {
 
     fs::create_directories(include_dir_);
 
-    for (const auto& entry : fs::directory_iterator(packages_dir_)) {
+    for (const auto &entry : fs::directory_iterator(packages_dir_)) {
         if (!entry.is_directory() && !entry.is_symlink()) continue;
 
         std::string package_name = entry.path().filename().string();
@@ -103,8 +102,6 @@ void Resolver::export_headers() {
     }
 }
 
-std::string Resolver::get_include_path() const {
-    return include_dir_.string();
-}
+std::string Resolver::get_include_path() const { return include_dir_.string(); }
 
 } // namespace cpm

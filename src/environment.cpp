@@ -1,13 +1,14 @@
 #include "cpm/environment.hpp"
+
+#include <filesystem>
 #include <fstream>
+#include <map>
 #include <sstream>
+#include <string>
 
 namespace cpm {
 
-Environment::Environment(const std::filesystem::path& project_root)
-    : project_root_(project_root)
-    , cpm_dir_(project_root / ".cpm")
-{}
+Environment::Environment(const std::filesystem::path &project_root) : project_root_(project_root), cpm_dir_(project_root / ".cpm") {}
 
 void Environment::create() {
     namespace fs = std::filesystem;
@@ -21,7 +22,7 @@ void Environment::create() {
     // Create marker file
     std::ofstream marker(cpm_dir_ / ".cpm_env");
     marker << "# CPM Environment - Do not delete\n";
-    marker << "version=0.1.0\n";
+    marker << "version=" << CPM_VERSION << "\n";
     marker.close();
 
     // Create activation script
@@ -30,9 +31,7 @@ void Environment::create() {
     activate.close();
 }
 
-bool Environment::exists() const {
-    return std::filesystem::exists(cpm_dir_ / ".cpm_env");
-}
+bool Environment::exists() const { return std::filesystem::exists(cpm_dir_ / ".cpm_env"); }
 
 std::map<std::string, std::string> Environment::get_env_vars() const {
     std::map<std::string, std::string> env;
@@ -45,21 +44,13 @@ std::map<std::string, std::string> Environment::get_env_vars() const {
     return env;
 }
 
-std::filesystem::path Environment::get_include_dir() const {
-    return cpm_dir_ / "include";
-}
+std::filesystem::path Environment::get_include_dir() const { return cpm_dir_ / "include"; }
 
-std::filesystem::path Environment::get_lib_dir() const {
-    return cpm_dir_ / "lib";
-}
+std::filesystem::path Environment::get_lib_dir() const { return cpm_dir_ / "lib"; }
 
-std::filesystem::path Environment::get_bin_dir() const {
-    return cpm_dir_ / "bin";
-}
+std::filesystem::path Environment::get_bin_dir() const { return cpm_dir_ / "bin"; }
 
-std::filesystem::path Environment::get_packages_dir() const {
-    return cpm_dir_ / "packages";
-}
+std::filesystem::path Environment::get_packages_dir() const { return cpm_dir_ / "packages"; }
 
 std::string Environment::generate_activation_script() const {
     std::ostringstream s;

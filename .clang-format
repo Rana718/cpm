@@ -1,9 +1,11 @@
 BasedOnStyle: LLVM
 IndentWidth: 4
-ColumnLimit: 100
-AllowShortFunctionsOnASingleLine: Inline
+ColumnLimit: 200
+AllowShortFunctionsOnASingleLine: All
 AllowShortIfStatementsOnASingleLine: WithoutElse
 AllowShortLoopsOnASingleLine: true
+BinPackParameters: true
+BinPackArguments: true
 BreakBeforeBraces: Attach
 NamespaceIndentation: None
 SortIncludes: CaseInsensitive
@@ -15,3 +17,7 @@ IncludeCategories:
     Priority: 2
   - Regex: '.*'
     Priority: 3
+AlignAfterOpenBracket: DontAlign
+PenaltyBreakBeforeFirstCallParameter: 10000
+PenaltyReturnTypeOnItsOwnLine: 10000
+PenaltyBreakOpenParenthesis: 10000
