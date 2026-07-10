@@ -24,6 +24,7 @@ COMMANDS:
     init <name>         Initialize a new project with cpm.toml
     run                 Install + build + run (like uv run)
     build               Compile the project
+    build -s            Static production build (optimized, stripped)
     start               Run the built binary
     install             Install all dependencies from cpm.toml
     add <package>       Add a package (github:user/repo@version)
@@ -73,7 +74,8 @@ int main(int argc, char* argv[]) {
             return pm.run();
         }
         else if (command == "build") {
-            return pm.build();
+            bool static_build = (argc >= 3 && std::string(argv[2]) == "-s");
+            return pm.build(static_build);
         }
         else if (command == "start") {
             return pm.start();

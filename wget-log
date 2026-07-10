@@ -1,5 +1,0 @@
-Spider mode enabled. Check if remote file exists.
---2026-07-09 03:48:05--  https://gmplib.org/download/gmp/gmp-6.1.2.tar.bz2
-Loaded CA certificate '/etc/ssl/certs/ca-certificates.crt'
-Resolving gmplib.org (gmplib.org)... 130.242.124.102
-Connecting to gmplib.org (gmplib.org)|130.242.124.102|:443... 

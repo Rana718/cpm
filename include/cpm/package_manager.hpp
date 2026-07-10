@@ -18,7 +18,7 @@ public:
     void remove_package(const std::string& package_name);
     void update();
     void list();
-    int build();
+    int build(bool static_build = false);
     int run();
     int start();
     void setup_environment();

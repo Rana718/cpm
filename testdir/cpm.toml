@@ -3,8 +3,8 @@
 [project]
 name = "countries-api"
 version = "0.1.0"
-description = "REST API for countries - Seastar + nlohmann/json"
-cpp_standard = "23"
+description = "REST API for countries - uWebSockets + nlohmann/json"
+cpp_standard = "20"
 entry = "main.cpp"
 output = "countries-api"
 
@@ -13,6 +13,7 @@ start = "./countries-api"
 
 [dependencies]
 json = "github:nlohmann/json"
+uWebSockets = "github:uNetworking/uWebSockets@v20.64.0"
 
 [system-dependencies]
-seastar = "github:scylladb/seastar"
+uSockets = "github:uNetworking/uSockets@v0.8.8"

@@ -9,7 +9,6 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -145,7 +144,7 @@ void PackageManager::clone_git_dependency(const GitDependency &dep) {
   auto cache_path = get_cache_path(dep.name, version);
   std::filesystem::create_directories(cache_path);
 
-  std::string clone_cmd = "git clone --depth 1 --quiet ";
+  std::string clone_cmd = "git -c advice.detachedHead=false clone --depth 1 --quiet ";
   if (version != "HEAD") {
     clone_cmd += "--branch " + version + " ";
   }
@@ -211,7 +210,7 @@ void PackageManager::resolve_system_dependency(const SystemDependency &dep) {
     // Use --jobs for parallel submodule fetch, --shallow-submodules to save
     // time
     std::string clone_cmd =
-        "git clone --depth 1 --quiet "
+        "git -c advice.detachedHead=false clone --depth 1 --quiet "
         "--recurse-submodules --shallow-submodules --jobs=4 ";
     if (version != "HEAD") {
       clone_cmd += "--branch " + version + " ";
@@ -1101,7 +1100,7 @@ void PackageManager::resolve_transitive_deps(
         if (!fs::exists(dep_src)) {
           fs::create_directories(dep_src);
           std::string clone_cmd =
-              "git clone --depth 1 --quiet --recurse-submodules ";
+              "git -c advice.detachedHead=false clone --depth 1 --quiet --recurse-submodules ";
           if (version != "HEAD")
             clone_cmd += "--branch " + version + " ";
           clone_cmd += github_url + " " + dep_src.string() + " 2>/dev/null";
@@ -1179,7 +1178,7 @@ void PackageManager::ensure_build_tools(const std::filesystem::path &bin_dir) {
 
     auto stow_src = global_cache_dir_ / "tool-stow-src";
     if (!fs::exists(stow_src)) {
-      std::string cmd = "git clone --depth 1 --quiet --branch v2.4.1 "
+      std::string cmd = "git -c advice.detachedHead=false clone --depth 1 --quiet --branch v2.4.1 "
                         "https://github.com/aspiers/stow " + stow_src.string() + " 2>/dev/null";
       std::system(cmd.c_str());
     }
@@ -1472,7 +1471,7 @@ void PackageManager::install() {
             auto cache_path = get_cache_path(dep.name, version);
             std::filesystem::create_directories(cache_path);
 
-            std::string clone_cmd = "git clone --depth 1 --quiet ";
+            std::string clone_cmd = "git -c advice.detachedHead=false clone --depth 1 --quiet ";
             if (version != "HEAD")
               clone_cmd += "--branch " + version + " ";
             clone_cmd += dep.github_url + " " + cache_path.string() +
@@ -1658,7 +1657,7 @@ PackageManager::build_compile_command(const ProjectConfig &config) const {
   return cmd.str();
 }
 
-int PackageManager::build() {
+int PackageManager::build(bool static_build) {
   auto toml_path = project_root_ / "cpm.toml";
   if (!std::filesystem::exists(toml_path)) {
     throw std::runtime_error("No cpm.toml found. Run 'cpm init <name>' first.");
@@ -1679,7 +1678,89 @@ int PackageManager::build() {
   std::string compiler = detect_compiler(config);
   std::string compile_cmd = build_compile_command(config);
 
-  std::cout << "[cpm] Building " << config.name << "...\n";
+  // ─── Production build (-s flag): optimized + self-contained bundle ───
+  if (static_build) {
+    std::cout << "[cpm] Building " << config.name << " (production)...\n";
+    std::cout << "[cpm] " << compiler << " | c++" << config.cpp_standard << " | "
+              << Config::get_architecture() << " | optimized\n";
+
+    // Add optimization flags (no -flto if mixing compiler versions)
+    auto spc = compile_cmd.find(' ');
+    if (spc != std::string::npos) {
+      compile_cmd.insert(spc, " -O3 -DNDEBUG -march=x86-64-v3");
+    }
+
+    // Find shell.nix for nix-shell linking
+    NixEnv nix(local_cpm_dir_, global_cache_dir_);
+    std::filesystem::path shell_nix_path;
+    if (nix.available() && !config.system_dependencies.empty()) {
+      for (const auto& entry : std::filesystem::directory_iterator(global_cache_dir_)) {
+        auto snix = entry.path() / "shell.nix";
+        if (std::filesystem::exists(snix) &&
+            entry.path().filename().string().find("-src") != std::string::npos) {
+          shell_nix_path = snix; break;
+        }
+      }
+    }
+
+    std::cout.flush();
+    int ret;
+    // For production builds: use system compiler directly (same GCC that built .a files)
+    // Don't use nix-shell here — it has a different GCC version causing LTO mismatch
+    // Only use nix-shell if linking requires .so files not in .cpm/lib/
+    bool has_seastar = std::filesystem::exists(local_cpm_dir_ / "lib" / "libseastar.a");
+    if (!shell_nix_path.empty() && has_seastar) {
+      // Seastar needs nix .so at link time — but WITHOUT -flto (version mismatch)
+      std::string nix_cmd = "nix-shell " + shell_nix_path.string() +
+                            " --run \'" + compile_cmd + "\' 2>&1";
+      ret = std::system(nix_cmd.c_str());
+    } else {
+      ret = std::system(compile_cmd.c_str());
+    }
+
+    if (ret != 0) {
+      std::cerr << "[cpm] Production build failed.\n";
+      return 1;
+    }
+
+    // Strip binary
+    auto out = get_output_path(config);
+    std::system(("strip " + out.string() + " 2>/dev/null").c_str());
+
+    // Bundle shared libs into dist/ for portability
+    auto dist_dir = project_root_ / "dist";
+    std::filesystem::create_directories(dist_dir);
+    std::filesystem::copy(out, dist_dir / out.filename(),
+                          std::filesystem::copy_options::overwrite_existing);
+
+    // Copy required .so files
+    std::string ldd_cmd = "ldd " + out.string() + " 2>/dev/null | grep nix | awk \'{print $3}\' | "
+                          "xargs -I{} cp {} " + dist_dir.string() + "/ 2>/dev/null";
+    std::system(ldd_cmd.c_str());
+
+    // Create run script that sets LD_LIBRARY_PATH
+    auto run_script = dist_dir / "run.sh";
+    std::ofstream rs(run_script);
+    rs << "#!/bin/bash\n";
+    rs << "DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n";
+    rs << "export LD_LIBRARY_PATH=\"$DIR:$LD_LIBRARY_PATH\"\n";
+    rs << "exec \"$DIR/" << out.filename().string() << "\" \"$@\"\n";
+    rs.close();
+    std::filesystem::permissions(run_script, std::filesystem::perms::owner_all |
+                                             std::filesystem::perms::group_read |
+                                             std::filesystem::perms::group_exec |
+                                             std::filesystem::perms::others_read |
+                                             std::filesystem::perms::others_exec);
+
+    auto size = std::filesystem::file_size(out);
+    std::cout << "[cpm] Built: " << out.filename().string()
+              << " (" << (size / 1024 / 1024) << " MB, optimized)\n";
+    std::cout << "[cpm] Bundle: dist/ (portable, copy to any Linux)\n";
+    std::cout << "[cpm]   Run with: ./dist/run.sh\n";
+    return 0;
+  }
+
+    std::cout << "[cpm] Building " << config.name << "...\n";
   std::cout << "[cpm] " << compiler << " | c++" << config.cpp_standard << " | "
             << Config::get_architecture() << "\n";
 
