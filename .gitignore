@@ -5,8 +5,15 @@ cmake-build*/
 # CPM
 .cpm/
 
+# Binaries
+testdir/countries-api
+testdir/myapp
+testdir/dist/
+*.o
+*.a
+*.so
+
 # IDE
 .vscode/
 .idea/
 *.swp
- */dist/

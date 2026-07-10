@@ -287,10 +287,11 @@ bool PackageManager::build_from_source(const std::string &name, const std::files
                 }
             }
 
-            // Nix packages needed for the build environment
-            std::vector<std::string> nix_deps = {nix_compiler, "cmake", "ninja", "pkg-config", "boost", "fmt", "yaml-cpp", "lz4", "gnutls", "gmp", "nettle", "liburing", "numactl", "hwloc", "c-ares",
-                "protobuf", "ragel", "stow", "valgrind", "lksctp-tools", "python3Packages.pyelftools", "dpdk", "openssl", "libxml2", "automake", "autoconf", "libtool", "libtasn1", "zlib", "p11-kit",
-                "xfsprogs"};
+            // Detect nix packages from the project's CMakeLists.txt
+            NixEnv nix_detector(local_cpm_dir_, global_cache_dir_);
+            auto detected_deps = nix_detector.detect_nix_deps(src_path);
+            std::vector<std::string> nix_deps = {nix_compiler};
+            nix_deps.insert(nix_deps.end(), detected_deps.begin(), detected_deps.end());
 
             // Generate shell.nix
             std::string shell_nix_content = "{ pkgs ? import <nixpkgs> {} }:\n"
@@ -348,7 +349,8 @@ bool PackageManager::build_from_source(const std::string &name, const std::files
 
             // ─── Symlink ALL nix dependency headers/libs into install_prefix ───
             // This ensures cpm build can find boost, fmt, etc. without nix-shell
-            std::vector<std::string> link_pkgs = {"boost", "fmt", "yaml-cpp", "lz4", "gnutls", "gmp", "nettle", "liburing", "numactl", "hwloc", "c-ares", "protobuf", "openssl"};
+            // Link nix packages detected from the project
+            auto link_pkgs = detected_deps;
 
             for (const auto &pkg : link_pkgs) {
                 // Try .dev output first (has headers), then normal output
@@ -464,61 +466,6 @@ bool PackageManager::build_from_source(const std::string &name, const std::files
             std::system(patch_urls.c_str());
 
             // Auto-upgrade old deps if system compiler is too new
-            std::string gcc_ver = Config::get_compiler_version();
-            int gcc_major = 0;
-            try {
-                gcc_major = std::stoi(gcc_ver);
-            } catch (...) {
-            }
-
-            if (gcc_major >= 14) {
-                // Remove hash checks but preserve closing parens and other syntax
-                // Match: URL_HASH SHA256=hexvalue OR URL_MD5 hexvalue
-                // Replace just the hash directive, keeping anything after (like closing paren)
-                std::string remove_hashes = "sed -i 's/URL_HASH SHA256=[a-f0-9A-F]*/DOWNLOAD_NO_EXTRACT FALSE/g; "
-                                            "s/URL_MD5 [a-f0-9A-F]*/DOWNLOAD_NO_EXTRACT FALSE/g' " +
-                                            recipe_file.string() + " 2>/dev/null";
-                std::system(remove_hashes.c_str());
-
-                // Upgrade Boost (1.81 doesn't work with GCC 14+)
-                std::string patch_boost =
-                    "sed -i 's|boost.io/release/1\\.8[0-3]\\.[0-9]/source/boost_1_8[0-3]_[0-9]|boost.io/release/1.86.0/source/boost_1_86_0|g' " + recipe_file.string() + " 2>/dev/null";
-                std::system(patch_boost.c_str());
-
-                // Upgrade GMP (6.1.x doesn't work with GCC 14+)
-                std::string patch_gmp = "sed -i 's|gmp/gmp-6\\.[0-2]\\.[0-9]|gmp/gmp-6.3.0|g' " + recipe_file.string() + " 2>/dev/null && " +
-                                        // GMP configure fails with GCC 16 due to strict C23 defaults
-                                        // Add CFLAGS=-std=gnu11 to make its configure tests pass
-                                        "sed -i 's|<SOURCE_DIR>/configure --prefix=<INSTALL_DIR> --srcdir=<SOURCE_DIR>|"
-                                        "env CFLAGS=-std=gnu11 <SOURCE_DIR>/configure --prefix=<INSTALL_DIR> --srcdir=<SOURCE_DIR>|g' " +
-                                        recipe_file.string() + " 2>/dev/null";
-                std::system(patch_gmp.c_str());
-
-                // Upgrade nettle if present (old versions incompatible with new GMP)
-                std::string patch_nettle = R"(sed -i 's|nettle/nettle-3\.[0-7]\(\.[0-9]\)\?|nettle/nettle-3.10|g' )" + recipe_file.string() + " 2>/dev/null";
-                std::system(patch_nettle.c_str());
-
-                // Disable DPDK if python-pyelftools not available (DPDK is optional for Seastar)
-                if (std::system("python3 -c 'import elftools' > /dev/null 2>&1") != 0) {
-                    std::string disable_dpdk = "sed -i '/cooking_ingredient.*dpdk/,/^)/s/^/#/' " + recipe_file.string() + " 2>/dev/null";
-                    std::system(disable_dpdk.c_str());
-                    std::cout << "[cpm]   → disabled DPDK (python-pyelftools not available)\n";
-                }
-
-                // Install python deps into .cpm if needed for any remaining builds
-                auto pip_target = bin_dir.parent_path() / "python";
-                if (!fs::exists(pip_target / "elftools")) {
-                    std::string pip_cmd = "pip install --target=" + pip_target.string() + " pyelftools > /dev/null 2>&1";
-                    std::system(pip_cmd.c_str());
-                    if (fs::exists(pip_target / "elftools")) {
-                        compiler_env += "export PYTHONPATH=\"" + pip_target.string() + ":$PYTHONPATH\" && ";
-                    }
-                } else {
-                    compiler_env += "export PYTHONPATH=\"" + pip_target.string() + ":$PYTHONPATH\" && ";
-                }
-
-                std::cout << "[cpm]   → auto-upgraded deps (compatible with GCC " << gcc_major << ")\n";
-            }
         }
 
         cook_cmd += " 2>&1";
@@ -635,9 +582,9 @@ bool PackageManager::build_from_source(const std::string &name, const std::files
         std::cout << "[cpm]   → cooking.sh failed, trying other methods...\n";
         std::cerr << "[cpm]\n";
         std::cerr << "[cpm] If the build failed due to compiler incompatibility, try:\n";
-        std::cerr << "[cpm]   1. Add 'compiler = \"gcc-13\"' to [project] in cpm.toml\n";
+        std::cerr << "[cpm]   1. Add .compiler = \"gcc-XX\" (e.g. gcc-13, clang-17)' to [project] in cpm.toml\n";
         std::cerr << "[cpm]   2. Install it:\n";
-        std::cerr << "[cpm]      Arch: sudo pacman -S gcc13\n";
+        std::cerr << "[cpm]      Arch: sudo pacman -S gccXX (e.g. gcc13)\n";
         std::cerr << "[cpm]      Ubuntu: sudo apt install g++-13\n";
         std::cerr << "[cpm]      Fedora: sudo dnf install gcc-c++-13\n";
         std::cerr << "[cpm]\n";

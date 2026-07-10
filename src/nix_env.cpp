@@ -120,15 +120,24 @@ std::vector<std::string> NixEnv::detect_nix_deps(const std::filesystem::path &sr
         }
     }
 
-    // If has cooking.sh, add common seastar deps
+    // If has cooking.sh, add stow (required by cooking mechanism)
     if (fs::exists(src_path / "cooking.sh")) {
         deps.insert("stow");
-        deps.insert("ragel");
-        deps.insert("python3Packages.pyelftools");
-        deps.insert("xfsprogs");
-        deps.insert("libtasn1");
-        deps.insert("libidn2");
-        deps.insert("p11-kit");
+    }
+
+    // If has install-dependencies.sh, parse it for additional nix deps
+    auto deps_script = src_path / "install-dependencies.sh";
+    if (fs::exists(deps_script)) {
+        std::ifstream df(deps_script);
+        std::string line;
+        while (std::getline(df, line)) {
+            // Look for package names in arrays
+            auto nix_name = cmake_to_nix(line);
+            // Only add if it's a known mapping (not random text)
+            if (nix_name != line && !nix_name.empty()) {
+                deps.insert(nix_name);
+            }
+        }
     }
 
     return std::vector<std::string>(deps.begin(), deps.end());
@@ -163,7 +172,7 @@ std::string NixEnv::generate_shell_nix(const std::string &compiler, const std::s
     if (!compiler.empty()) {
         nix << "    " << compiler << "\n";
     } else {
-        nix << "    gcc13\n";
+        nix << "    " << compiler << "\n";
     }
 
     // Extra deps
