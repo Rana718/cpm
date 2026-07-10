@@ -1,48 +1,91 @@
 # CPM Architecture
 
-CPM is a C/C++ package manager designed around **complete isolation** — your project never modifies the host system, and every build is reproducible.
+CPM is a C/C++ package manager built around **complete isolation** using **Nix** as the backend for reproducible builds.
+
+---
+
+## System Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         USER                                     │
+│                                                                  │
+│   cpm init ─── cpm install ─── cpm build ─── cpm run           │
+│                                  │              │                │
+│   cpm run file.cpp              cpm build -s   cpm start        │
+│   (single file)                 (production)   (run binary)     │
+└───────────────────────────────────┬─────────────────────────────┘
+                                    │
+┌───────────────────────────────────▼─────────────────────────────┐
+│                        cpm.toml                                  │
+│                                                                  │
+│  [project]                                                       │
+│  name, entry, output, cpp_standard, compiler                    │
+│                                                                  │
+│  [dependencies]        ──→ Header-only (git clone)              │
+│  [system-dependencies] ──→ Compiled (nix-shell build)           │
+└───────────────────────────────────┬─────────────────────────────┘
+                                    │
+        ┌───────────────────────────┼───────────────────────┐
+        │                           │                        │
+        ▼                           ▼                        ▼
+┌───────────────┐     ┌─────────────────────┐    ┌──────────────────┐
+│  Git Clone    │     │    Nix Shell         │    │  System Compiler │
+│  (--depth 1)  │     │  (isolated env)      │    │  (fallback)      │
+│               │     │                      │    │                  │
+│ nlohmann/json │     │ ┌──────────────────┐ │    │  g++ / clang++   │
+│ fmt           │     │ │ gcc13 / clang17  │ │    │                  │
+│ uWebSockets   │     │ │ boost, fmt, gmp  │ │    │                  │
+│               │     │ │ gnutls, hwloc... │ │    │                  │
+└───────┬───────┘     │ └──────────────────┘ │    └────────┬─────────┘
+        │             │                      │             │
+        │             │  cmake/ninja/make    │             │
+        │             │  configure.py        │             │
+        │             │  cooking.sh          │             │
+        │             └──────────┬───────────┘             │
+        │                        │                         │
+        ▼                        ▼                         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                         .cpm/ (project-local)                    │
+│                                                                  │
+│  ├── include/          ← symlinks to headers (all packages)     │
+│  ├── lib/              ← compiled .a files                      │
+│  ├── packages/         ← header-only package symlinks           │
+│  ├── defines.txt       ← compile flags (-DSEASTAR_...)          │
+│  ├── bin/              ← build tools (stow)                     │
+│  └── compile_commands.json (for editor LSP)                     │
+└───────────────────────────────────┬─────────────────────────────┘
+                                    │
+┌───────────────────────────────────▼─────────────────────────────┐
+│                    ~/.cpm/cache/ (global)                         │
+│                                                                  │
+│  ├── json-v3.12.0/           ← cloned once, symlinked           │
+│  ├── hiredis-v1.4.0-src/     ← source                          │
+│  ├── hiredis-v1.4.0-built/   ← built artifacts (cached)        │
+│  │   ├── include/hiredis/                                       │
+│  │   ├── lib/libhiredis.a                                       │
+│  │   └── defines.txt                                            │
+│  └── seastar-25.05.0-src/    ← source + shell.nix              │
+│      └── build/release/      ← nix-shell built artifacts        │
+└─────────────────────────────────────────────────────────────────┘
+                                    │
+┌───────────────────────────────────▼─────────────────────────────┐
+│                     /nix/store/ (nix managed)                    │
+│                                                                  │
+│  Pre-built binaries cached from cache.nixos.org                 │
+│  ├── boost-1.89.0/                                              │
+│  ├── fmt-10.2.1/                                                │
+│  ├── gnutls-3.8.13/                                             │
+│  ├── gcc-13.4.0/                                                │
+│  └── ... (all deps, downloaded once)                            │
+└─────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
 ## How It Works
 
-### Project Structure
-
-```
-myproject/
-├── cpm.toml              # Package configuration
-├── main.cpp              # Your entry file
-├── src/                  # Additional source files (optional)
-├── compile_commands.json # Auto-generated for editor LSP support
-└── .cpm/                 # Isolated environment (like node_modules)
-    ├── include/          # All package headers (symlinked)
-    ├── lib/              # Compiled libraries (.a files)
-    ├── packages/         # Cloned header-only packages
-    ├── defines.txt       # Compile flags required by packages
-    ├── bin/              # Build tools (stow, etc.)
-    └── activate.sh       # Shell activation script
-```
-
-### Global Cache
-
-```
-~/.cpm/cache/
-├── json-v3.12.0/                    # Header-only, cloned once
-├── hiredis-v1.4.0-src/              # Source for compiled lib
-├── hiredis-v1.4.0-built/            # Pre-built artifacts
-│   ├── include/hiredis/
-│   └── lib/libhiredis.a
-└── seastar-seastar-25.05.0-built/   # Nix-built artifacts
-    ├── include/seastar/
-    ├── lib/libseastar.a
-    └── defines.txt
-```
-
----
-
-## Isolation Levels
-
-### Level 1: Header-Only Packages (`[dependencies]`)
+### 1. Header-Only Packages (`[dependencies]`)
 
 ```toml
 [dependencies]
@@ -50,191 +93,203 @@ json = "github:nlohmann/json"
 fmt = "github:fmtlib/fmt@10.1.1"
 ```
 
-- Cloned from GitHub with `--depth 1` (shallow, fast)
-- Cached globally in `~/.cpm/cache/<name>-<version>/`
-- Symlinked into `.cpm/packages/<name>`
-- Headers exposed via `.cpm/include/<namespace>/` symlinks
-- Zero compilation needed
+- Cloned from GitHub (`git clone --depth 1`)
+- Cached globally in `~/.cpm/cache/`
+- Symlinked into `.cpm/include/`
+- No compilation needed
 
-### Level 2: Compiled System Libraries (`[system-dependencies]`)
+### 2. Compiled System Libraries (`[system-dependencies]`)
 
 ```toml
 [system-dependencies]
-hiredis = "github:redis/hiredis"
 seastar = "github:scylladb/seastar"
+hiredis = "github:redis/hiredis"
 ```
 
-**Simple libraries (cmake/make/autotools):**
+**When Nix is available (recommended):**
 
-1. Download source → `~/.cpm/cache/<name>-<version>-src/`
-2. Build from source → `~/.cpm/cache/<name>-<version>-built/`
-3. Install artifacts into `.cpm/include/` + `.cpm/lib/`
-4. Cache built binaries — never rebuilds
+1. Detect deps from `CMakeLists.txt` → `find_package()` calls
+2. Generate `shell.nix` with correct compiler + all deps
+3. Build inside `nix-shell` → correct versions guaranteed
+4. Copy headers/libs to `.cpm/`
+5. `cpm build` also links inside nix-shell
 
-**Complex libraries with nix (`cooking.sh`-based):**
+**When Nix is NOT available (fallback):**
 
-1. Download source (including submodules)
-2. Generate `shell.nix` — provides exact compiler + all deps
-3. Build inside `nix-shell` — nix provides boost, fmt, gnutls, gmp, hwloc etc.
-4. Copy results to cache
-5. `cpm build` also runs inside the same `nix-shell`
+1. Download source from GitHub
+2. Auto-detect build system (cmake/make/meson/autotools/cooking.sh)
+3. Build from source into `~/.cpm/cache/<name>-built/`
+4. Copy to `.cpm/`
 
 ---
 
 ## Nix Integration
 
-When `nix` is available and a library uses `cooking.sh`:
+Nix provides **isolated, reproducible build environments**:
 
-```
-nix-shell shell.nix → exact GCC version + all deps → build → .cpm/lib/libseastar.a
-```
-
-The `shell.nix` is generated by cpm and contains all required build deps:
+- Each project gets its own `shell.nix` with exact deps
+- Compiler version from `cpm.toml` (`gcc13`, `clang-17`, etc.)
+- Default: `gcc13` + C++20 (broad compatibility)
+- Pre-built binaries from `cache.nixos.org` (no local compilation for deps)
+- Completely isolated from host system
 
 ```nix
+# Auto-generated by cpm from CMakeLists.txt analysis
 { pkgs ? import <nixpkgs> {} }:
 pkgs.mkShell {
   buildInputs = with pkgs; [
-    gcc13          # pinned compiler (compatible with old libraries)
+    gcc13 cmake ninja pkg-config
     boost fmt yaml-cpp lz4 gnutls gmp nettle
-    liburing numactl hwloc c-ares protobuf ragel
-    ...
+    liburing numactl hwloc c-ares protobuf
   ];
 }
 ```
 
-**Why nix?** Libraries like Seastar pin old dependency versions (e.g., Boost 1.81) that don't compile with the system's latest GCC (e.g., GCC 16). Nix provides the exact compatible versions without touching the host system.
-
-**Reuse:** Nix packages are cached in `/nix/store/` — downloaded once, reused forever across all projects.
-
 ---
 
-## Auto-Upgrades for Compiler Compatibility
+## `cpm run file.cpp` (Single File Execution)
 
-When your system compiler is newer than a library's pinned dependency versions, cpm automatically patches them:
+Like `uv run script.py` — compile and run a single file:
 
-| Library | Old Version | Why Incompatible | Upgraded To |
-|---------|-------------|------------------|-------------|
-| Boost   | 1.81        | GCC 16: `__normal_iterator` incomplete | 1.86 |
-| GMP     | 6.1.2       | GCC 16: C23 strict mode | 6.3.0 |
-| Nettle  | ≤ 3.7       | Old GMP API | 3.10 |
+```bash
+# Without cpm.toml — uses system g++ directly
+cpm run hello.cpp
 
-When `compiler_major >= 14`, cpm:
-1. Patches `cooking_recipe.cmake` URLs (no hash verification)
-2. Sets `CFLAGS=-std=gnu11` for GMP configure
-3. Mirrors broken URLs (e.g., `gmplib.org` → `ftp.gnu.org`)
-
----
-
-## compile_commands.json
-
-Generated automatically on `cpm install`. Tells clangd (the LSP used by Zed, VS Code, Neovim) about:
-
-- Include paths → `.cpm/include/`
-- Compile defines → from `.cpm/defines.txt`
-- C++ standard version
-
-This is the **standard mechanism** — every editor reads it without any plugin-specific config.
-
-Example:
-```json
-[
-  {
-    "directory": "/home/user/myproject",
-    "command": "g++ -std=c++20 -I/home/user/myproject/.cpm/include -DSEASTAR_SCHEDULING_GROUPS_COUNT=16 -c main.cpp",
-    "file": "/home/user/myproject/main.cpp"
-  }
-]
+# With cpm.toml — uses project's deps (.cpm/include/)
+cpm run quick.cpp
 ```
 
+- Detects `.c` vs `.cpp` → uses `gcc` or `g++`
+- If `cpm.toml` exists: adds `-I.cpm/include` and defines
+- Cleans up binary after execution
+
 ---
 
-## Multi-File Projects
+## Production Build (`cpm build -s`)
 
-cpm automatically compiles all `.cpp`/`.cc`/`.cxx` files:
-- Root directory source files
-- `src/` subdirectory (recursively)
-
-```toml
-[project]
-entry = "main.cpp"   # entry point (required)
+```bash
+cpm build -s
 ```
 
-All other `.cpp` files in `src/` are automatically included in the build.
+Produces:
+
+```
+dist/
+├── countries-api    ← optimized, stripped binary
+├── libfmt.so.10    ← bundled app-specific .so files
+├── libboost_*.so   ← (excludes system libc/libstdc++)
+└── run.sh          ← launcher (sets LD_LIBRARY_PATH)
+```
+
+- **O3 optimized** + stripped (no debug symbols)
+- **Portable bundle** — copy `dist/` to any x86_64 Linux
+- **patchelf** rewrites binary to use `$ORIGIN` rpath
+- System libs (libc, libstdc++) NOT bundled — target provides its own
+- Works on Ubuntu, Debian, Fedora, CentOS, Amazon Linux, Alpine (with gcompat)
 
 ---
 
 ## Commands
 
-| Command | What it does |
-|---------|-------------|
-| `cpm init <name>` | Creates `cpm.toml`, `main.cpp`, `.cpm/`, `compile_commands.json` |
-| `cpm install` | Downloads deps, builds system libs, exports headers, regenerates `compile_commands.json` |
-| `cpm build` | Compiles project (runs in nix-shell if nix deps present) |
-| `cpm run` | `install` (if needed) → `build` → execute |
-| `cpm start` | Execute the already-built binary |
-| `cpm add <pkg>` | Add + install a package: `cpm add github:redis/hiredis` |
-| `cpm remove <name>` | Remove package + clean headers/libs |
-| `cpm update` | Re-download and rebuild all packages |
-| `cpm list` | Show installed packages |
-| `cpm setup` | Install nix backend |
-| `cpm info` | Show system/compiler info |
+| Command             | Description                                  |
+| ------------------- | -------------------------------------------- |
+| `cpm init <name>`   | Create project (cpm.toml + main.cpp + .cpm/) |
+| `cpm install`       | Download + build all deps                    |
+| `cpm build`         | Compile (runs in nix-shell if needed)        |
+| `cpm build -s`      | Production build (optimized + dist/ bundle)  |
+| `cpm run`           | install → build → run                        |
+| `cpm run file.cpp`  | Compile + run single file                    |
+| `cpm start`         | Run the built binary                         |
+| `cpm add <pkg>`     | Add package: `cpm add github:redis/hiredis`  |
+| `cpm remove <name>` | Remove package                               |
+| `cpm update`        | Re-download + rebuild all                    |
+| `cpm list`          | Show installed packages                      |
+| `cpm setup`         | Install nix backend                          |
+| `cpm --version`     | Show version                                 |
 
 ---
 
-## cpm.toml Format
+## cpm.toml
 
 ```toml
 [project]
 name = "myapp"
 version = "0.1.0"
-cpp_standard = "20"       # 17, 20, 23
-entry = "main.cpp"        # entry source file
-output = "myapp"          # output binary name
-# compiler = "gcc-13"     # optional: pin system compiler
+cpp_standard = "20"        # 11, 14, 17, 20, 23, 26
+compiler = "gcc-13"        # gcc, gcc-13, clang-17, or empty (default: gcc13 in nix)
+entry = "main.cpp"
+output = "myapp"
 
 [scripts]
-start = "./myapp"         # what 'cpm start' runs
+start = "./myapp --smp 1"
 
 [dependencies]
-# Header-only GitHub packages (no compilation)
-json = "github:nlohmann/json@v3.11.3"   # pinned version
-fmt  = "github:fmtlib/fmt"              # latest tag auto-resolved
+# Header-only (just git clone)
+json = "github:nlohmann/json@v3.11.3"
+fmt = "github:fmtlib/fmt"           # latest tag auto-resolved
 
 [system-dependencies]
-# Compiled libraries (built from source into .cpm/)
+# Compiled libraries (built from source in nix-shell)
 hiredis = "github:redis/hiredis"
 seastar = "github:scylladb/seastar"
 ```
-
-**Version resolution:**
-- `@v1.2.3` — exact version tag
-- `@*` or omitted — auto-resolves to latest GitHub tag via `git ls-remote`
 
 ---
 
 ## Isolation Guarantees
 
-| What | Isolated? | Where |
-|------|-----------|-------|
-| Package headers | ✅ | `.cpm/include/` |
-| Compiled libraries | ✅ | `.cpm/lib/` |
-| Build tools (stow) | ✅ | `.cpm/bin/` |
-| Build deps (boost, gmp...) | ✅ | `/nix/store/` (nix) |
-| Source cache | ✅ | `~/.cpm/cache/` |
-| Host system | 🚫 Never touched | — |
+| What                     | Where           | Touches System?  |
+| ------------------------ | --------------- | ---------------- |
+| Package headers          | `.cpm/include/` | ❌               |
+| Compiled libraries       | `.cpm/lib/`     | ❌               |
+| Build tools              | `.cpm/bin/`     | ❌               |
+| Nix deps (boost, gmp...) | `/nix/store/`   | ❌ (nix-managed) |
+| Source cache             | `~/.cpm/cache/` | ❌               |
+| Production bundle        | `dist/`         | ❌               |
+| System compiler          | `/usr/bin/g++`  | Read-only        |
+
+**Nothing is ever installed to `/usr/local/`, `/usr/lib/`, or any system path.**
+
+---
+
+## Multi-File Projects
+
+```
+myproject/
+├── cpm.toml
+├── main.cpp              ← entry point
+├── src/
+│   ├── db.hpp            ← auto-included in build
+│   ├── handlers.hpp
+│   └── utils.cpp         ← auto-compiled
+└── .cpm/                 ← isolated environment
+```
+
+- `entry` in cpm.toml = main source file
+- All `.cpp` files in `src/` auto-compiled
+- `compile_commands.json` lists all source files for editor LSP
+
+---
+
+## Supported Distros
+
+Works on any Linux with:
+
+- `git`, `curl` — for downloading
+- `nix` — for isolated builds (`cpm setup` to install)
+- `cmake` — for building cpm itself
+
+Tested on: Arch Linux, Ubuntu, Debian, Fedora
 
 ---
 
 ## Performance
 
-- **Parallel downloads** — up to 4 concurrent with live spinner
-- **Global cache** — packages downloaded once, symlinked into projects
-- **Nix binary cache** — `cache.nixos.org` provides pre-built binaries, no local compilation needed for most packages
-- **Incremental** — only re-downloads/rebuilds what changed
-
-```
-cpm install (cached): ~0.1s
-cpm install (fresh):  seconds for simple libs, minutes for Seastar
-cpm build:            seconds
-```
+| Operation                         | Time                            |
+| --------------------------------- | ------------------------------- |
+| `cpm install` (cached)            | ~0.1s                           |
+| `cpm install` (fresh, simple lib) | ~5s                             |
+| `cpm install` (fresh, seastar)    | ~2min (nix downloads pre-built) |
+| `cpm build`                       | ~2s                             |
+| `cpm run file.cpp`                | ~1s                             |
+| `cpm build -s` (production)       | ~5s                             |
