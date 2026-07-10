@@ -71,6 +71,10 @@ int main(int argc, char *argv[]) {
             }
             pm.init(argv[2]);
         } else if (command == "run") {
+            if (argc >= 3 && std::string(argv[2]).find(".c") != std::string::npos) {
+                // cpm run file.cpp — compile and run a single file
+                return pm.run_file(argv[2]);
+            }
             return pm.run();
         } else if (command == "build") {
             bool static_build = (argc >= 3 && std::string(argv[2]) == "-s");

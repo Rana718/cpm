@@ -20,6 +20,7 @@ class PackageManager {
     void list();
     int build(bool static_build = false);
     int run();
+    int run_file(const std::string& file);
     int start();
     void setup_environment();
 

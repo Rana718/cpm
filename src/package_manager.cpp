@@ -1654,6 +1654,114 @@ int PackageManager::run() {
     return WEXITSTATUS(ret);
 }
 
+int PackageManager::run_file(const std::string& file) {
+    namespace fs = std::filesystem;
+
+    auto file_path = project_root_ / file;
+    if (!fs::exists(file_path)) {
+        std::cerr << "[cpm] File not found: " << file << "\n";
+        return 1;
+    }
+
+    // Detect language from extension
+    auto ext = fs::path(file).extension().string();
+    bool is_cpp = (ext == ".cpp" || ext == ".cc" || ext == ".cxx" || ext == ".C");
+    bool is_c = (ext == ".c");
+
+    if (!is_cpp && !is_c) {
+        std::cerr << "[cpm] Unsupported file type: " << ext << " (use .c, .cpp, .cc, .cxx)\n";
+        return 1;
+    }
+
+    // Output binary name: file without extension
+    auto out_name = fs::path(file).stem().string();
+    auto out_path = project_root_ / out_name;
+
+    // Check if cpm.toml exists — if yes, use project environment
+    auto toml_path = project_root_ / "cpm.toml";
+    std::string compiler;
+    std::string std_flag;
+    std::string include_flag;
+    std::string lib_flag;
+    std::string defines;
+
+    if (fs::exists(toml_path)) {
+        // Use project environment
+        auto config = TomlParser::parse(toml_path);
+        compiler = is_cpp ? "g++" : "gcc";
+        if (!config.compiler.empty()) {
+            if (config.compiler.find("clang") != std::string::npos) {
+                compiler = is_cpp ? "clang++" : "clang";
+            }
+        }
+        std_flag = is_cpp ? " -std=c++" + config.cpp_standard : " -std=c11";
+
+        auto include_dir = local_cpm_dir_ / "include";
+        if (fs::exists(include_dir)) {
+            include_flag = " -I" + include_dir.string();
+        }
+
+        // For cpm run file.cpp: only link if explicitly needed
+        // Don't auto-link all .a files (they may have huge transitive deps)
+        // User should use 'cpm build' for full project builds with libs
+
+        // Read defines
+        auto defines_file = local_cpm_dir_ / "defines.txt";
+        if (fs::exists(defines_file)) {
+            std::ifstream df(defines_file);
+            std::string line;
+            while (std::getline(df, line)) {
+                if (!line.empty() && line[0] == '-') defines += " " + line;
+            }
+        }
+    } else {
+        // No cpm.toml — use system compiler directly
+        compiler = is_cpp ? "g++" : "gcc";
+        std_flag = is_cpp ? " -std=c++20" : " -std=c11";
+    }
+
+    // Build command
+    std::string cmd = compiler + std_flag + include_flag + defines + " " + file + " -o " + out_path.string() + lib_flag;
+
+    std::cout << "[cpm] " << compiler << " " << file << "\n";
+
+    // If project uses nix, wrap in nix-shell
+    NixEnv nix(local_cpm_dir_, global_cache_dir_);
+    std::filesystem::path shell_nix_path;
+    if (nix.available() && fs::exists(toml_path)) {
+        for (const auto& entry : fs::directory_iterator(global_cache_dir_)) {
+            auto snix = entry.path() / "shell.nix";
+            if (fs::exists(snix) && entry.path().filename().string().find("-src") != std::string::npos) {
+                shell_nix_path = snix;
+                break;
+            }
+        }
+    }
+
+    int ret;
+    if (!shell_nix_path.empty()) {
+        std::string nix_cmd = "nix-shell " + shell_nix_path.string() + " --run '" + cmd + "' 2>&1";
+        ret = std::system(nix_cmd.c_str());
+    } else {
+        ret = std::system(cmd.c_str());
+    }
+
+    if (ret != 0) {
+        std::cerr << "[cpm] Compilation failed.\n";
+        return 1;
+    }
+
+    // Run the binary
+    std::cout << "────────────────────────────────────────\n";
+    std::cout.flush();
+    ret = std::system(out_path.string().c_str());
+
+    // Clean up binary
+    fs::remove(out_path);
+
+    return WEXITSTATUS(ret);
+}
+
 int PackageManager::start() {
     auto toml_path = project_root_ / "cpm.toml";
     if (!std::filesystem::exists(toml_path)) {
