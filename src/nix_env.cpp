@@ -1,5 +1,4 @@
 #include "cpm/nix_env.hpp"
-#include <iostream>
 #include <fstream>
 #include <sstream>
 #include <array>

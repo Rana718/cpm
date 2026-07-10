@@ -1735,10 +1735,17 @@ int PackageManager::build(bool static_build) {
     std::filesystem::copy(out, dist_dir / out.filename(),
                           std::filesystem::copy_options::overwrite_existing);
 
-    // Copy required .so files
+    // Copy required .so files (exclude system libs — target provides its own glibc)
     std::string ldd_cmd = "ldd " + out.string() + " 2>/dev/null | grep nix | awk \'{print $3}\' | "
+                          "grep -v \'libc\\.so\\|libpthread\\|libdl\\.so\\|librt\\.so\\|"
+                          "libm\\.so\\|ld-linux\\|libgcc_s\\|libstdc++\' | "
                           "xargs -I{} cp {} " + dist_dir.string() + "/ 2>/dev/null";
     std::system(ldd_cmd.c_str());
+
+    // Patch binary: use system ld-linux, find bundled libs via $ORIGIN
+    std::string patch_cmd = "patchelf --set-interpreter /lib64/ld-linux-x86-64.so.2 "
+                            "--set-rpath \'\$ORIGIN\' " + (dist_dir / out.filename()).string() + " 2>/dev/null";
+    std::system(patch_cmd.c_str());
 
     // Create run script that sets LD_LIBRARY_PATH
     auto run_script = dist_dir / "run.sh";

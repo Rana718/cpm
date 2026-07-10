@@ -1,6 +1,4 @@
 #include "cpm/resolver.hpp"
-#include <iostream>
-#include <set>
 
 namespace cpm {
 
