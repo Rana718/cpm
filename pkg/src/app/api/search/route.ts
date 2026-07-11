@@ -92,11 +92,35 @@ const NAME_EXCLUDE = [
   "-rb", "-ruby", "-java", "-golang", "-dotnet", "-swift", "-php",
 ];
 
+// Well-known repos that are applications/databases, not usable C/C++ libraries
+const APP_REPOS = new Set([
+  "redis/redis", "antirez/redis",
+  "curl/curl",
+  "torvalds/linux",
+  "git/git",
+  "nginx/nginx",
+  "postgres/postgres", "postgresql/postgresql",
+  "sqlite/sqlite",
+  "mysql/mysql-server",
+  "memcached/memcached",
+  "apache/httpd",
+  "openssl/openssl",
+  "ffmpeg/ffmpeg",
+  "videolan/vlc",
+  "obsproject/obs-studio",
+  "php/php-src",
+  "python/cpython",
+  "ruby/ruby",
+]);
+
 function isValidCppRepo(repo: GitHubRepo): boolean {
   const lang = (repo.language ?? "").toLowerCase();
 
   // If language is explicitly a non-C language, exclude it
   if (NON_CPP_LANGUAGES.has(lang)) return false;
+
+  // Exclude well-known applications (not libraries)
+  if (APP_REPOS.has(repo.full_name.toLowerCase())) return false;
 
   // Exclude clear binding/wrapper repos by name
   const name = repo.name.toLowerCase();

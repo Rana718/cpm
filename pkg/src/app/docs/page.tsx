@@ -1,9 +1,29 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { useTheme } from "next-themes";
 import { VscPackage } from "react-icons/vsc";
 import { FaGithub } from "react-icons/fa";
+import { ThemeToggle } from "@/components/ThemeToggle";
+import { Light as SyntaxHighlighter } from "react-syntax-highlighter";
+import { atomOneDark as darkStyle, github as lightStyle } from "react-syntax-highlighter/dist/esm/styles/hljs";
+import bash from "react-syntax-highlighter/dist/esm/languages/hljs/bash";
+import cpp from "react-syntax-highlighter/dist/esm/languages/hljs/cpp";
+import c from "react-syntax-highlighter/dist/esm/languages/hljs/c";
+import json from "react-syntax-highlighter/dist/esm/languages/hljs/json";
+import yaml from "react-syntax-highlighter/dist/esm/languages/hljs/yaml";
+import plaintext from "react-syntax-highlighter/dist/esm/languages/hljs/plaintext";
+
+SyntaxHighlighter.registerLanguage("bash", bash);
+SyntaxHighlighter.registerLanguage("shell", bash);
+SyntaxHighlighter.registerLanguage("cpp", cpp);
+SyntaxHighlighter.registerLanguage("c", c);
+SyntaxHighlighter.registerLanguage("json", json);
+SyntaxHighlighter.registerLanguage("yaml", yaml);
+SyntaxHighlighter.registerLanguage("toml", plaintext);
+SyntaxHighlighter.registerLanguage("text", plaintext);
+
 import {
   AiOutlineCopy,
   AiOutlineCheck,
@@ -28,7 +48,7 @@ function CopyButton({ text }: { text: string }) {
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
       }}
-      className="absolute top-2 right-2 p-1.5 rounded bg-white/10 hover:bg-white/20 transition-colors text-white/70 hover:text-white"
+      className="p-1.5 rounded bg-white/10 hover:bg-white/20 transition-colors text-white/70 hover:text-white"
     >
       {copied ? <AiOutlineCheck className="h-3.5 w-3.5" /> : <AiOutlineCopy className="h-3.5 w-3.5" />}
     </button>
@@ -36,15 +56,38 @@ function CopyButton({ text }: { text: string }) {
 }
 
 function CodeBlock({ code, lang = "bash" }: { code: string; lang?: string }) {
+  const { resolvedTheme } = useTheme();
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  const isDark = resolvedTheme === "dark";
+
   return (
-    <div className="relative my-3 rounded-lg overflow-hidden border border-border">
-      <div className="flex items-center justify-between bg-zinc-800 px-4 py-1.5 text-xs text-zinc-400 font-mono">
-        <span>{lang}</span>
+    <div className="relative group my-3 rounded-lg overflow-hidden border border-border">
+      <div className="flex items-center justify-end px-3 py-1.5 bg-zinc-800 dark:bg-zinc-900">
         <CopyButton text={code} />
       </div>
-      <pre className="bg-zinc-900 text-zinc-100 px-4 py-3 text-sm font-mono overflow-x-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-        <code>{code}</code>
-      </pre>
+      {mounted ? (
+        <SyntaxHighlighter
+          style={isDark ? darkStyle : lightStyle}
+          language={lang}
+          PreTag="div"
+          customStyle={{
+            margin: 0,
+            borderRadius: 0,
+            fontSize: "0.85rem",
+            padding: "1rem",
+            background: isDark ? "#282b2e" : "#f8f8ff",
+            msOverflowStyle: "none",
+            scrollbarWidth: "none",
+          }}
+        >
+          {code}
+        </SyntaxHighlighter>
+      ) : (
+        <pre className="bg-muted px-4 py-4 text-sm font-mono overflow-x-auto [&::-webkit-scrollbar]:hidden">
+          <code>{code}</code>
+        </pre>
+      )}
     </div>
   );
 }
@@ -142,7 +185,7 @@ export default function DocsPage() {
   return (
     <div className="min-h-screen flex flex-col overflow-x-hidden">
       {/* Header */}
-      <header className="border-b border-border bg-card/80 backdrop-blur sticky top-0 z-10">
+      <header className="border-b border-border bg-card/80 backdrop-blur sticky top-0 z-50">
         <div className="w-full px-10 h-14 flex items-center justify-between">
           <button
             onClick={() => router.push("/")}
@@ -154,7 +197,7 @@ export default function DocsPage() {
               beta
             </span>
           </button>
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
             <button
               onClick={() => router.push("/")}
               className="text-sm text-muted-foreground hover:text-foreground transition-colors"
@@ -170,13 +213,14 @@ export default function DocsPage() {
               <FaGithub className="h-4 w-4" />
               <span className="hidden sm:inline">GitHub</span>
             </a>
+            <ThemeToggle />
           </div>
         </div>
       </header>
 
       <div className="flex flex-1 w-full">
-        {/* Sidebar */}
-        <aside className="hidden lg:flex flex-col w-60 flex-shrink-0 border-r border-border sticky top-14 h-[calc(100vh-3.5rem)] overflow-y-auto py-6 px-4">
+        {/* Sidebar — fixed, never scrolls */}
+        <aside className="hidden lg:flex flex-col w-60 flex-shrink-0 border-r border-border fixed top-14 left-0 h-[calc(100vh-3.5rem)] py-6 px-4 bg-background z-40">
           <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3 px-2">
             Documentation
           </p>
@@ -198,8 +242,8 @@ export default function DocsPage() {
           </nav>
         </aside>
 
-        {/* Main content */}
-        <main className="flex-1 min-w-0 px-8 lg:px-12 py-10 max-w-4xl">
+        {/* Main content — offset by sidebar width on large screens */}
+        <main className="flex-1 min-w-0 px-8 lg:pl-[calc(15rem+2rem)] lg:pr-12 py-10 max-w-4xl">
           {/* Hero */}
           <div className="mb-10">
             <h1 className="text-3xl font-bold text-foreground font-heading mb-2">

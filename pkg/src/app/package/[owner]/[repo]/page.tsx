@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { MarkdownRenderer } from "@/components/MarkdownRenderer";
+import { ThemeToggle } from "@/components/ThemeToggle";
 import {
   AiOutlineStar,
   AiOutlineCopy,
@@ -395,19 +396,28 @@ function Header() {
         >
           <AiOutlineTag className="h-5 w-5 text-primary" />
           cpm registry
-          <span className="text-xs bg-secondary text-secondary-foreground rounded-full px-2 py-0.5 font-mono">
+          <span className="text-xs bg-secondary text-secondary-foreground rounded-full px-2 py-0.5 font-mono hidden sm:inline">
             beta
           </span>
         </button>
-        <a
-          href="https://github.com/Rana718/cpm"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
-        >
-          <FaGithub className="h-4 w-4" />
-          <span className="hidden sm:inline">GitHub</span>
-        </a>
+        <div className="flex items-center gap-3">
+          <a
+            href="/docs"
+            className="text-sm text-muted-foreground hover:text-foreground transition-colors hidden sm:inline"
+          >
+            Docs
+          </a>
+          <a
+            href="https://github.com/Rana718/cpm"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <FaGithub className="h-4 w-4" />
+            <span className="hidden sm:inline">GitHub</span>
+          </a>
+          <ThemeToggle />
+        </div>
       </div>
     </header>
   );

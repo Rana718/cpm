@@ -22,9 +22,15 @@ function timeAgo(dateStr: string): string {
 export function PackageCard({ pkg }: { pkg: PackageResult }) {
   const router = useRouter();
 
+  const handleClick = () => {
+    // Store current scroll position so back feels instant
+    sessionStorage.setItem("scrollY", String(window.scrollY));
+    router.push(`/package/${pkg.owner}/${pkg.name}`);
+  };
+
   return (
     <div
-      onClick={() => router.push(`/package/${pkg.owner}/${pkg.name}`)}
+      onClick={handleClick}
       className="group flex flex-col gap-3 rounded-xl border border-border bg-card p-5 hover:border-ring transition-all hover:shadow-md cursor-pointer"
     >
       {/* Header */}
