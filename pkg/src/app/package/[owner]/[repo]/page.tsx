@@ -59,7 +59,7 @@ function CodeBlock({ label, code, hint }: { label: string; code: string; hint?: 
         {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
       </div>
       <div className="flex items-center gap-2 bg-muted rounded-lg px-4 py-3 font-mono text-sm border border-border">
-        <code className="flex-1 text-foreground overflow-x-auto whitespace-nowrap">{code}</code>
+        <code className="flex-1 text-foreground overflow-x-auto whitespace-nowrap [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">{code}</code>
         <CopyButton text={code} />
       </div>
     </div>
@@ -95,9 +95,9 @@ export default function PackagePage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex flex-col">
+      <div className="min-h-screen flex flex-col overflow-x-hidden">
         <Header />
-        <div className="flex-1 max-w-6xl w-full mx-auto px-4 py-10 space-y-4">
+        <div className="flex-1 w-full px-10 py-10 space-y-4">
           <div className="h-8 w-48 bg-muted rounded animate-pulse" />
           <div className="h-32 bg-muted rounded-xl animate-pulse" />
           <div className="h-96 bg-muted rounded-xl animate-pulse" />
@@ -108,7 +108,7 @@ export default function PackagePage() {
 
   if (error || !pkg) {
     return (
-      <div className="min-h-screen flex flex-col">
+      <div className="min-h-screen flex flex-col overflow-x-hidden">
         <Header />
         <div className="flex-1 flex items-center justify-center text-muted-foreground">
           <div className="text-center">
@@ -133,10 +133,10 @@ export default function PackagePage() {
   ];
 
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className="min-h-screen flex flex-col overflow-x-hidden">
       <Header />
 
-      <main className="flex-1 w-full max-w-6xl mx-auto px-4 py-8">
+      <main className="flex-1 w-full px-10 py-8">
         {/* Back */}
         <button
           onClick={() => router.back()}
@@ -282,7 +282,7 @@ export default function PackagePage() {
                           </td>
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-2 bg-muted rounded-md px-3 py-1.5 font-mono text-xs w-fit max-w-xs">
-                              <code className="overflow-x-auto whitespace-nowrap text-foreground">
+                              <code className="overflow-x-auto whitespace-nowrap text-foreground [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
                                 cpm add github:{pkg.fullName}@{tag.name}
                               </code>
                               <CopyButton text={`cpm add github:${pkg.fullName}@${tag.name}`} />
@@ -384,7 +384,7 @@ function Header() {
   const router = useRouter();
   return (
     <header className="border-b border-border bg-card/80 backdrop-blur sticky top-0 z-10">
-      <div className="max-w-6xl mx-auto px-4 h-14 flex items-center justify-between">
+      <div className="w-full px-10 h-14 flex items-center justify-between">
         <button
           onClick={() => router.push("/")}
           className="flex items-center gap-2 font-semibold text-foreground hover:text-primary transition-colors"
