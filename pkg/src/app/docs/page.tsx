@@ -1,13 +1,11 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
-import { VscPackage } from "react-icons/vsc";
+import { useRouter } from "next/navigation";
 import { FaGithub } from "react-icons/fa";
-import { ThemeToggle } from "@/components/ThemeToggle";
 import { Light as SyntaxHighlighter } from "react-syntax-highlighter";
-import { atomOneDark as darkStyle, github as lightStyle } from "react-syntax-highlighter/dist/esm/styles/hljs";
+import { androidstudio as darkStyle, xcode as lightStyle } from "react-syntax-highlighter/dist/esm/styles/hljs";
 import bash from "react-syntax-highlighter/dist/esm/languages/hljs/bash";
 import cpp from "react-syntax-highlighter/dist/esm/languages/hljs/cpp";
 import c from "react-syntax-highlighter/dist/esm/languages/hljs/c";
@@ -183,44 +181,9 @@ export default function DocsPage() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col overflow-x-hidden">
-      {/* Header */}
-      <header className="border-b border-border bg-card/80 backdrop-blur sticky top-0 z-50">
-        <div className="w-full px-10 h-14 flex items-center justify-between">
-          <button
-            onClick={() => router.push("/")}
-            className="flex items-center gap-2 font-semibold text-foreground hover:text-primary transition-colors"
-          >
-            <VscPackage className="h-5 w-5 text-primary" />
-            cpm registry
-            <span className="text-xs bg-secondary text-secondary-foreground rounded-full px-2 py-0.5 font-mono hidden sm:inline">
-              beta
-            </span>
-          </button>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => router.push("/")}
-              className="text-sm text-muted-foreground hover:text-foreground transition-colors"
-            >
-              Search
-            </button>
-            <a
-              href="https://github.com/Rana718/cpm"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
-            >
-              <FaGithub className="h-4 w-4" />
-              <span className="hidden sm:inline">GitHub</span>
-            </a>
-            <ThemeToggle />
-          </div>
-        </div>
-      </header>
-
-      <div className="flex flex-1 w-full">
-        {/* Sidebar — fixed, never scrolls */}
-        <aside className="hidden lg:flex flex-col w-60 flex-shrink-0 border-r border-border fixed top-14 left-0 h-[calc(100vh-3.5rem)] py-6 px-4 bg-background z-40">
+    <div className="flex flex-1 overflow-x-hidden">
+      {/* Sidebar — fixed below the layout navbar */}
+      <aside className="hidden lg:flex flex-col w-60 flex-shrink-0 border-r border-border fixed top-14 left-0 h-[calc(100vh-3.5rem)] py-6 px-4 bg-background z-40">
           <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3 px-2">
             Documentation
           </p>
@@ -462,6 +425,5 @@ cpm start        # run existing binary`} />
           </div>
         </main>
       </div>
-    </div>
   );
 }

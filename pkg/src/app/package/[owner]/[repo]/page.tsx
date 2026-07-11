@@ -3,7 +3,6 @@
 import { useState, useEffect } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { MarkdownRenderer } from "@/components/MarkdownRenderer";
-import { ThemeToggle } from "@/components/ThemeToggle";
 import {
   AiOutlineStar,
   AiOutlineCopy,
@@ -95,8 +94,7 @@ export default function PackagePage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex flex-col overflow-x-hidden">
-        <Header />
+      <div className="flex flex-col flex-1 overflow-x-hidden">
         <div className="flex-1 w-full px-10 py-10 space-y-4">
           <div className="h-8 w-48 bg-muted rounded animate-pulse" />
           <div className="h-32 bg-muted rounded-xl animate-pulse" />
@@ -108,8 +106,7 @@ export default function PackagePage() {
 
   if (error || !pkg) {
     return (
-      <div className="min-h-screen flex flex-col overflow-x-hidden">
-        <Header />
+      <div className="flex flex-col flex-1 overflow-x-hidden">
         <div className="flex-1 flex items-center justify-center text-muted-foreground">
           <div className="text-center">
             <p className="text-lg font-medium">Package not found</p>
@@ -133,9 +130,7 @@ export default function PackagePage() {
   ];
 
   return (
-    <div className="min-h-screen flex flex-col overflow-x-hidden">
-      <Header />
-
+    <div className="flex flex-col flex-1 overflow-x-hidden">
       <main className="flex-1 w-full px-10 py-8">
         {/* Back */}
         <button
@@ -382,43 +377,5 @@ ${pkg.cpmSystemToml}`}</pre>
         cpm registry — powered by GitHub API
       </footer>
     </div>
-  );
-}
-
-function Header() {
-  const router = useRouter();
-  return (
-    <header className="border-b border-border bg-card/80 backdrop-blur sticky top-0 z-10">
-      <div className="w-full px-10 h-14 flex items-center justify-between">
-        <button
-          onClick={() => router.push("/")}
-          className="flex items-center gap-2 font-semibold text-foreground hover:text-primary transition-colors"
-        >
-          <AiOutlineTag className="h-5 w-5 text-primary" />
-          cpm registry
-          <span className="text-xs bg-secondary text-secondary-foreground rounded-full px-2 py-0.5 font-mono hidden sm:inline">
-            beta
-          </span>
-        </button>
-        <div className="flex items-center gap-3">
-          <a
-            href="/docs"
-            className="text-sm text-muted-foreground hover:text-foreground transition-colors hidden sm:inline"
-          >
-            Docs
-          </a>
-          <a
-            href="https://github.com/Rana718/cpm"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <FaGithub className="h-4 w-4" />
-            <span className="hidden sm:inline">GitHub</span>
-          </a>
-          <ThemeToggle />
-        </div>
-      </div>
-    </header>
   );
 }
