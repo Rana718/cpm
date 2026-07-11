@@ -54,9 +54,7 @@ export default function Home() {
               <span className="hidden sm:inline">GitHub</span>
             </a>
             <a
-              href="https://github.com/Rana718/cpm#readme"
-              target="_blank"
-              rel="noopener noreferrer"
+              href="/docs"
               className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
             >
               <HiOutlineBookOpen className="h-4 w-4" />

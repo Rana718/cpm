@@ -2,8 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useParams, useRouter } from "next/navigation";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { MarkdownRenderer } from "@/components/MarkdownRenderer";
 import {
   AiOutlineStar,
   AiOutlineCopy,
@@ -241,9 +240,14 @@ export default function PackagePage() {
 
             {/* Tab: README */}
             {tab === "readme" && (
-              <div className="prose prose-sm dark:prose-invert max-w-none rounded-xl border border-border bg-card p-6 overflow-x-auto">
+              <div className="rounded-xl border border-border bg-card p-6 overflow-x-hidden">
                 {pkg.readme ? (
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{pkg.readme}</ReactMarkdown>
+                  <MarkdownRenderer
+                    content={pkg.readme}
+                    owner={pkg.owner}
+                    repo={pkg.name}
+                    branch={pkg.defaultBranch}
+                  />
                 ) : (
                   <p className="text-muted-foreground">No README available for this package.</p>
                 )}
