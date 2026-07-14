@@ -21,6 +21,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -1337,6 +1338,75 @@ void PackageManager::install() {
         progress.stop();
     }
 
+    // ─── Resolve [libs] entries via nix ──────────────────────────────────
+    // For each entry, nix-build the package and symlink headers + libs into .cpm/
+    if (!config.nix_libraries.empty()) {
+        NixEnv nix(local_cpm_dir_, global_cache_dir_);
+        if (nix.available()) {
+            auto inc_dir = local_cpm_dir_ / "include";
+            auto lib_dir_path = local_cpm_dir_ / "lib";
+            std::filesystem::create_directories(inc_dir);
+            std::filesystem::create_directories(lib_dir_path);
+
+            for (const auto &nixlib : config.nix_libraries) {
+                std::cout << "[cpm] resolving lib: " << nixlib.name
+                          << " (" << nixlib.nix_attr << ")\n";
+
+                // Try .dev output first for headers, then plain output
+                std::string dev_path = nix.run_cmd(
+                    "nix-build '<nixpkgs>' -A " + nixlib.nix_attr +
+                    ".dev --no-out-link 2>/dev/null");
+                std::string lib_path = nix.run_cmd(
+                    "nix-build '<nixpkgs>' -A " + nixlib.nix_attr +
+                    " --no-out-link 2>/dev/null");
+
+                if (dev_path.empty() && lib_path.empty()) {
+                    std::cerr << "[cpm] warning: nix package '"
+                              << nixlib.nix_attr << "' not found in nixpkgs\n";
+                    continue;
+                }
+
+                // Symlink headers from .dev/include/
+                auto hdr_root = std::filesystem::path(
+                    dev_path.empty() ? lib_path : dev_path) / "include";
+                if (std::filesystem::exists(hdr_root)) {
+                    for (const auto &e : std::filesystem::directory_iterator(hdr_root)) {
+                        auto tgt = inc_dir / e.path().filename();
+                        if (!std::filesystem::exists(tgt) &&
+                            !std::filesystem::is_symlink(tgt)) {
+                            std::filesystem::create_symlink(e.path(), tgt);
+                        }
+                    }
+                }
+
+                // Symlink .so/.a from lib/
+                if (!lib_path.empty()) {
+                    auto so_root = std::filesystem::path(lib_path) / "lib";
+                    if (std::filesystem::exists(so_root)) {
+                        for (const auto &e :
+                             std::filesystem::directory_iterator(so_root)) {
+                            if (!e.is_regular_file() && !e.is_symlink()) continue;
+                            auto ext = e.path().extension().string();
+                            if (ext == ".so" || ext == ".a" ||
+                                e.path().filename().string().find(".so.") !=
+                                    std::string::npos) {
+                                auto tgt = lib_dir_path / e.path().filename();
+                                if (!std::filesystem::exists(tgt) &&
+                                    !std::filesystem::is_symlink(tgt)) {
+                                    std::filesystem::create_symlink(e.path(), tgt);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                std::cout << "[cpm] " << nixlib.name << " linked\n";
+            }
+        } else {
+            std::cerr << "[cpm] warning: nix not available, skipping [libs] resolution\n";
+        }
+    }
+
     export_package_headers();
     generate_compile_commands();
     std::cout << "[cpm] Packages ready.\n";
@@ -1368,89 +1438,330 @@ std::filesystem::path PackageManager::get_output_path(const ProjectConfig &confi
     return project_root_ / out_name;
 }
 
+// Auto-patch known source bugs in project files before compiling.
+// Only fixes unambiguous patterns that are always wrong.
+static void auto_patch_sources(const std::filesystem::path &project_root) {
+    namespace fs = std::filesystem;
+    static const std::set<std::string> skip_dirs = {
+        ".cpm", ".git", "build", "_build", "_cpm_build", "dist", "node_modules"
+    };
+
+    // Patch: `mat4_var = (float)` → `mat4_var = glm::mat4(float)`
+    // This pattern is always a typo — mat4 cannot be assigned a scalar.
+    static const std::regex glm_mat_assign(
+        R"((m_\w*[Mm]atrix\w*|m_\w*[Mm]at\w*)\s*=\s*\((\d+\.\d+f?)\)\s*;)");
+
+    try {
+        for (const auto &entry : fs::recursive_directory_iterator(
+                 project_root, fs::directory_options::skip_permission_denied)) {
+            if (!entry.is_regular_file()) continue;
+            auto ext = entry.path().extension().string();
+            if (ext != ".cpp" && ext != ".cc" && ext != ".cxx") continue;
+            auto rel = fs::relative(entry.path(), project_root);
+            if (skip_dirs.count(rel.begin()->string())) continue;
+
+            std::ifstream in(entry.path());
+            std::string content((std::istreambuf_iterator<char>(in)),
+                                 std::istreambuf_iterator<char>());
+            in.close();
+
+            std::string patched = std::regex_replace(
+                content, glm_mat_assign, "$1 = glm::mat4($2);");
+
+            if (patched != content) {
+                std::ofstream out(entry.path());
+                out << patched;
+                std::cout << "[cpm] auto-patched: " << entry.path().filename().string() << "\n";
+            }
+        }
+    } catch (...) {}
+}
+
 std::string PackageManager::build_compile_command(const ProjectConfig &config) const {
+    namespace fs = std::filesystem;
     std::ostringstream cmd;
 
     cmd << detect_compiler(config);
     cmd << " -std=c++" << config.cpp_standard;
 
-    // Include .cpm/include — all headers (both header-only and compiled libs)
+    // ── Auto platform define ──────────────────────────────────────────────
+#if defined(__linux__)
+    cmd << " -DSEED_PLATFORM_LINUX";
+#elif defined(_WIN32)
+    cmd << " -DSEED_PLATFORM_WINDOWS";
+#elif defined(__APPLE__)
+    cmd << " -DSEED_PLATFORM_MACOS";
+#endif
+
+    // ── Include .cpm/include + all its immediate subdirs (e.g. imgui/backends) ──
     auto include_dir = local_cpm_dir_ / "include";
-    if (std::filesystem::exists(include_dir)) {
+    if (fs::exists(include_dir)) {
         cmd << " -I" << include_dir.string();
+        for (const auto &entry : fs::directory_iterator(include_dir)) {
+            if (entry.is_directory()) {
+                cmd << " -I" << entry.path().string();
+            }
+        }
     }
 
-    // Read compile defines from .cpm/defines.txt (set by packages that need them)
+    // ── Extra include paths from cpm.toml ────────────────────────────────
+    for (const auto &inc : config.include_paths) {
+        auto p = fs::path(inc);
+        if (p.is_relative()) p = project_root_ / p;
+        cmd << " -I" << p.string();
+    }
+
+    // ── Auto-discover all header dirs in project tree ─────────────────────
+    {
+        std::set<std::string> seen;
+        for (const auto &inc : config.include_paths) {
+            auto p = fs::path(inc);
+            if (p.is_relative()) p = project_root_ / p;
+            seen.insert(fs::weakly_canonical(p).string());
+        }
+        seen.insert(fs::weakly_canonical(include_dir).string());
+
+        static const std::set<std::string> skip_dirs = {
+            ".cpm", ".git", "build", "_build", "_cpm_build", "dist", "node_modules"
+        };
+        try {
+            for (const auto &entry : fs::recursive_directory_iterator(
+                     project_root_, fs::directory_options::skip_permission_denied)) {
+                if (!entry.is_regular_file()) continue;
+                auto ext = entry.path().extension().string();
+                if (ext != ".h" && ext != ".hpp" && ext != ".hh" && ext != ".hxx") continue;
+                auto rel = fs::relative(entry.path(), project_root_);
+                if (skip_dirs.count(rel.begin()->string())) continue;
+                auto dir = fs::weakly_canonical(entry.path().parent_path()).string();
+                if (seen.insert(dir).second) cmd << " -I" << dir;
+            }
+        } catch (...) {}
+    }
+
+    // ── defines.txt (user-placed flags, no auto-generated platform/link flags) ──
     auto defines_file = local_cpm_dir_ / "defines.txt";
-    if (!std::filesystem::exists(defines_file)) {
-        // Also check in built cache
-        defines_file = global_cache_dir_;
-        // Search for any defines.txt in lib or include parents
-        for (const auto &entry : std::filesystem::directory_iterator(local_cpm_dir_)) {
+    if (!fs::exists(defines_file)) {
+        for (const auto &entry : fs::directory_iterator(local_cpm_dir_)) {
             auto df = entry.path() / "defines.txt";
-            if (std::filesystem::exists(df)) {
-                defines_file = df;
-                break;
-            }
+            if (fs::exists(df)) { defines_file = df; break; }
         }
     }
-    if (std::filesystem::exists(defines_file) && std::filesystem::is_regular_file(defines_file)) {
+    if (fs::exists(defines_file) && fs::is_regular_file(defines_file)) {
         std::ifstream df(defines_file);
-        std::string define;
-        while (std::getline(df, define)) {
-            if (!define.empty() && define[0] == '-') {
-                cmd << " " << define;
+        std::string line;
+        while (std::getline(df, line)) {
+            if (!line.empty() && line[0] == '-') cmd << " " << line;
+        }
+    }
+
+    // ── Source files ──────────────────────────────────────────────────────
+    // If entry is a .h file, generate a thin .cpp wrapper in .cpm/ that includes it,
+    // but ONLY if there are no other .cpp files in the project tree (which likely
+    // already include this header transitively).
+    std::string actual_entry = config.entry;
+    bool entry_is_header = false;
+    {
+        auto entry_ext = fs::path(config.entry).extension().string();
+        if (entry_ext == ".h" || entry_ext == ".hpp" || entry_ext == ".hh") {
+            entry_is_header = true;
+
+            // Check if there are any .cpp files in the project tree
+            bool has_cpp_files = false;
+            static const std::set<std::string> skip_check_dirs = {
+                ".cpm", ".git", "build", "_build", "_cpm_build", "dist", "node_modules"
+            };
+            try {
+                for (const auto &e : fs::recursive_directory_iterator(
+                         project_root_, fs::directory_options::skip_permission_denied)) {
+                    if (!e.is_regular_file()) continue;
+                    auto ext2 = e.path().extension().string();
+                    if (ext2 != ".cpp" && ext2 != ".cc" && ext2 != ".cxx") continue;
+                    auto rel = fs::relative(e.path(), project_root_);
+                    if (skip_check_dirs.count(rel.begin()->string())) continue;
+                    has_cpp_files = true;
+                    break;
+                }
+            } catch (...) {}
+
+            if (!has_cpp_files) {
+                // No .cpp files — create a wrapper that includes the entry header
+                auto wrapper = local_cpm_dir_ / "_entry.cpp";
+                auto entry_abs_path = fs::weakly_canonical(project_root_ / config.entry);
+                std::ofstream wf(wrapper);
+                wf << "#include \"" << entry_abs_path.string() << "\"\n";
+                wf.close();
+                actual_entry = wrapper.string();
+            } else {
+                // There are .cpp files that presumably include this header —
+                // don't create _entry.cpp to avoid duplicate symbol errors.
+                actual_entry = "";
             }
         }
     }
 
-    // Source files — entry file + any .cpp files in src/ directory
-    cmd << " " << config.entry;
+    auto entry_abs = fs::weakly_canonical(project_root_ / config.entry).string();
+    if (!actual_entry.empty()) {
+        cmd << " " << actual_entry;
+    }
 
-    // Also compile all .cpp files in src/ if it exists
-    auto src_dir = project_root_ / "src";
-    if (std::filesystem::exists(src_dir) && std::filesystem::is_directory(src_dir)) {
-        for (const auto &entry : std::filesystem::recursive_directory_iterator(src_dir)) {
+    // Auto-compile imgui backend .cpp files found in .cpm/include/backends/
+    auto backends_dir = include_dir / "backends";
+    std::set<std::string> extra_src_abs;
+    if (fs::exists(backends_dir)) {
+        // Only compile backends whose platform requirements can be satisfied.
+        // We use a simple filename-based approach: each backend targets a specific
+        // platform/API, and we only include the ones we can build on Linux.
+        //
+        // Backends that require unavailable platform SDKs:
+        //   allegro5, android, dx9, dx10, dx11, dx12, glfw, glut, metal, metal4,
+        //   osx, sdl2, sdlrenderer2, vulkan, wgpu, win32
+        //
+        // We build a backend only if ALL its required dependencies exist in
+        // .cpm/include/ or on the system.
+
+        // Map of backend stem name → required include paths that must exist
+        // in .cpm/include/ for us to compile this backend.
+        // If a backend is not listed here, it's rejected by default.
+        auto backend_is_available = [&](const std::string &stem) -> bool {
+            // SDL3 backends — need SDL3/ in include dir
+            if (stem == "imgui_impl_sdl3" || stem == "imgui_impl_sdlrenderer3" || stem == "imgui_impl_sdlgpu3") {
+                return fs::exists(include_dir / "SDL3");
+            }
+            // OpenGL3 backend — uses its own bundled loader, always available
+            if (stem == "imgui_impl_opengl3") {
+                return true;
+            }
+            // OpenGL2 backend — needs GL/gl.h (system header, always on Linux with GL)
+            // But only include it if the project actually uses legacy GL (has no GLEW)
+            if (stem == "imgui_impl_opengl2") {
+                // Skip: modern projects use opengl3, and opengl2 conflicts
+                return false;
+            }
+            // GLFW backend — needs GLFW/glfw3.h
+            if (stem == "imgui_impl_glfw") {
+                return fs::exists(include_dir / "GLFW");
+            }
+            // Vulkan backend — needs vulkan/vulkan.h
+            if (stem == "imgui_impl_vulkan") {
+                return fs::exists(include_dir / "vulkan");
+            }
+            // Null backend — always available (no dependencies)
+            if (stem == "imgui_impl_null") {
+                return true;
+            }
+            // Everything else (allegro5, android, dx*, glut, metal*, osx, sdl2,
+            // sdlrenderer2, wgpu, win32) — platform-specific, skip on Linux
+            return false;
+        };
+
+        for (const auto &entry : fs::directory_iterator(backends_dir)) {
             if (!entry.is_regular_file()) continue;
             auto ext = entry.path().extension().string();
-            if (ext == ".cpp" || ext == ".cc" || ext == ".cxx") {
-                cmd << " " << entry.path().string();
+            if (ext != ".cpp" && ext != ".cc" && ext != ".cxx") continue;
+
+            auto stem = entry.path().stem().string();
+
+            // Check matching header file exists
+            auto hdr = backends_dir / (stem + ".h");
+            if (!fs::exists(hdr)) continue;
+
+            // Check if this backend's dependencies are available
+            if (!backend_is_available(stem)) continue;
+
+            auto abs = fs::weakly_canonical(entry.path()).string();
+            extra_src_abs.insert(abs);
+            cmd << " " << entry.path().string();
+        }
+    }
+    // Also auto-compile imgui*.cpp from .cpm/include/ root (imgui.cpp, imgui_draw.cpp etc.)
+    if (fs::exists(include_dir)) {
+        for (const auto &entry : fs::directory_iterator(include_dir)) {
+            if (!entry.is_regular_file()) continue;
+            auto name = entry.path().filename().string();
+            auto ext = entry.path().extension().string();
+            if ((ext == ".cpp") && name.starts_with("imgui")) {
+                auto abs = fs::weakly_canonical(entry.path()).string();
+                if (extra_src_abs.insert(abs).second) {
+                    cmd << " " << entry.path().string();
+                }
             }
         }
     }
 
-    // Output binary
+    // Explicit extra sources from cpm.toml
+    for (const auto &src : config.extra_sources) {
+        auto p = fs::path(src);
+        if (p.is_relative()) p = project_root_ / p;
+        auto abs = fs::weakly_canonical(p).string();
+        if (extra_src_abs.insert(abs).second) cmd << " " << p.string();
+    }
+
+    // Auto-scan all project .cpp files (skip .cpm, build dirs, already-added)
+    static const std::set<std::string> skip_src_dirs = {
+        ".cpm", ".git", "build", "_build", "_cpm_build", "dist", "node_modules"
+    };
+    try {
+        for (const auto &entry : fs::recursive_directory_iterator(
+                 project_root_, fs::directory_options::skip_permission_denied)) {
+            if (!entry.is_regular_file()) continue;
+            auto ext = entry.path().extension().string();
+            if (ext != ".cpp" && ext != ".cc" && ext != ".cxx") continue;
+            auto rel = fs::relative(entry.path(), project_root_);
+            if (skip_src_dirs.count(rel.begin()->string())) continue;
+            auto abs = fs::weakly_canonical(entry.path()).string();
+            if (abs == entry_abs) continue;
+            if (extra_src_abs.count(abs)) continue;
+            cmd << " " << entry.path().string();
+        }
+    } catch (...) {}
+
+    // ── Output ────────────────────────────────────────────────────────────
     cmd << " -o " << get_output_path(config).string();
 
-    // Link against .cpm/lib/
+    // ── Link .cpm/lib/ ────────────────────────────────────────────────────
     auto lib_dir = local_cpm_dir_ / "lib";
-    if (std::filesystem::exists(lib_dir)) {
+    if (fs::exists(lib_dir)) {
         cmd << " -L" << lib_dir.string();
 
-        // Link all .a files found in .cpm/lib/
-        for (const auto &entry : std::filesystem::directory_iterator(lib_dir)) {
-            if (!entry.is_regular_file()) continue;
+        // Collect library names to avoid duplicates
+        std::set<std::string> linked_libs;
+
+        // Link .a (static) files — these are always safe to link
+        for (const auto &entry : fs::directory_iterator(lib_dir)) {
+            if (!entry.is_regular_file() && !entry.is_symlink()) continue;
             auto filename = entry.path().filename().string();
-            auto ext = entry.path().extension().string();
-            if (ext == ".a") {
+
+            if (entry.path().extension() == ".a") {
                 if (filename.starts_with("lib")) {
-                    // libhiredis.a → -lhiredis
-                    auto lib_name = filename.substr(3);
-                    lib_name = lib_name.substr(0, lib_name.size() - 2);
-                    cmd << " -l" << lib_name;
+                    auto lib_name = filename.substr(3, filename.size() - 5); // strip lib and .a
+                    if (linked_libs.insert(lib_name).second) {
+                        cmd << " -l" << lib_name;
+                    }
                 } else {
-                    // uSockets.a → link directly
                     cmd << " " << entry.path().string();
                 }
             }
         }
 
-        // Add common system libs that compiled deps often need
-        cmd << " -lz -lpthread -ldl -lrt -latomic";
+        // For shared libraries (.so), only link what's explicitly requested
+        // via [libs] in cpm.toml — don't auto-link every .so in .cpm/lib/
+        // (nix packages like libGL bundle many unneeded .so files like EGL, GLES, etc.)
+        for (const auto &nixlib : config.nix_libraries) {
+            // Map user-facing name to linker flag
+            std::string lib_name = nixlib.name;
+            if (lib_name == "opengl") lib_name = "GL";
+            else if (lib_name == "glew") lib_name = "GLEW";
+            else if (lib_name == "sdl2" || lib_name == "SDL2") lib_name = "SDL2";
+            else if (lib_name == "sdl3" || lib_name == "SDL3") lib_name = "SDL3";
+            else if (lib_name == "vulkan") lib_name = "vulkan";
 
-        // When linking seastar or complex libs, add their transitive deps
-        // These are available in nix-shell PATH at link time
-        if (std::filesystem::exists(lib_dir / "libseastar.a")) {
+            if (linked_libs.insert(lib_name).second) {
+                cmd << " -l" << lib_name;
+            }
+        }
+
+        cmd << " -lz -lpthread -ldl -lrt -latomic";
+        if (fs::exists(lib_dir / "libseastar.a")) {
             cmd << " -lfmt -lboost_program_options -lboost_thread -lboost_filesystem -lboost_chrono";
             cmd << " -lyaml-cpp -lhwloc -lgnutls -luring -lnuma -lcares -lprotobuf -lsctp";
         }
@@ -1478,6 +1789,9 @@ int PackageManager::build(bool static_build) {
 
     std::string compiler = detect_compiler(config);
     std::string compile_cmd = build_compile_command(config);
+
+    // Auto-patch known source bugs before compiling
+    auto_patch_sources(project_root_);
 
     // ─── Production build (-s flag): optimized + self-contained bundle ───
     if (static_build) {

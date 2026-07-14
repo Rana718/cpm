@@ -17,16 +17,22 @@ struct SystemDependency {
     std::string name;
     std::string github_url;
     std::string version;
-    // Nix packages needed for this dep (auto-detected or user-specified)
     std::vector<std::string> nix_deps;
+};
+
+// A system library resolved via nix (e.g. glew, libGL, SDL3)
+// User just writes the nix package name; cpm links headers+libs into .cpm/
+struct NixLibrary {
+    std::string name;       // user-facing name (e.g. "glew")
+    std::string nix_attr;   // nixpkgs attribute (e.g. "glew", "libGL")
 };
 
 struct ProjectConfig {
     std::string name;
     std::string version;
     std::string description;
-    std::string cpp_standard; // "17", "20", "23"
-    std::string compiler;     // "gcc", "gcc-13", "clang-17", or empty (auto from deps)
+    std::string cpp_standard;
+    std::string compiler;
 
     std::string entry;
     std::string output;
@@ -35,8 +41,13 @@ struct ProjectConfig {
     std::vector<GitDependency> git_dependencies;
     std::vector<SystemDependency> system_dependencies;
 
-    // Nix configuration
-    std::vector<std::string> extra_nix_deps; // user can add extra nix packages
+    // [libs] — nix-resolved system libraries
+    std::vector<NixLibrary> nix_libraries;
+
+    // kept for advanced use
+    std::vector<std::string> extra_nix_deps;
+    std::vector<std::string> include_paths;
+    std::vector<std::string> extra_sources;
 };
 
 class TomlParser {
