@@ -1855,39 +1855,79 @@ int PackageManager::build(bool static_build) {
 
     // ─── Production build (-s flag): optimized + self-contained bundle ───
     if (static_build) {
-        std::cout << "[cpm] Building " << config.name << " (production)...\n";
+        std::cout << "[cpm] Building " << config.name << " (production, static)...\n";
         std::cout << "[cpm] " << compiler << " | c++" << config.cpp_standard << " | " << Config::get_architecture() << " | optimized\n";
 
-        // Add optimization flags (no -flto if mixing compiler versions)
+        // Add optimization and static linking flags
         auto spc = compile_cmd.find(' ');
         if (spc != std::string::npos) {
-            compile_cmd.insert(spc, " -O3 -DNDEBUG -march=x86-64-v3");
+            compile_cmd.insert(spc, " -O3 -DNDEBUG -DGLEW_NO_GLU -march=x86-64-v2 -static-libgcc -static-libstdc++");
         }
 
-        // Find shell.nix for nix-shell linking
-        NixEnv nix(local_cpm_dir_, global_cache_dir_);
-        std::filesystem::path shell_nix_path;
-        if (nix.available() && !config.system_dependencies.empty()) {
-            for (const auto &entry : std::filesystem::directory_iterator(global_cache_dir_)) {
-                auto snix = entry.path() / "shell.nix";
-                if (std::filesystem::exists(snix) && entry.path().filename().string().find("-src") != std::string::npos) {
-                    shell_nix_path = snix;
-                    break;
+        // Statically link libm to avoid glibc version dependency from math functions
+        // (sqrtf, sinf, etc. got version-bumped in newer glibc).
+        // Replace dynamic -lm or add static libm.a directly.
+        // Must be linked BEFORE any dynamic libs that also need math.
+        {
+            // Find libm.a path
+            std::string libm_path = "/usr/lib/libm.a";
+            if (!std::filesystem::exists(libm_path)) {
+                libm_path = "/usr/lib64/libm.a";
+            }
+            if (std::filesystem::exists(libm_path)) {
+                // Insert static libm before the -o flag so it's resolved early
+                auto out_pos = compile_cmd.find(" -o ");
+                if (out_pos != std::string::npos) {
+                    compile_cmd.insert(out_pos, " " + libm_path);
+                }
+                // Also append at the end to catch any remaining unresolved math symbols
+                compile_cmd += " -Wl,-Bstatic -lm -Wl,-Bdynamic";
+            }
+        }
+
+        // For static build: link .a files directly by path (not via -l) so they're
+        // always statically linked. Keep [libs] entries as dynamic -l flags.
+        // Strategy: replace "-l<name>" with the full .a path where the .a exists in .cpm/lib/
+        auto lib_dir = local_cpm_dir_ / "lib";
+        if (std::filesystem::exists(lib_dir)) {
+            for (const auto &entry : std::filesystem::directory_iterator(lib_dir)) {
+                if (!entry.is_regular_file()) continue;
+                if (entry.path().extension() != ".a") continue;
+                auto filename = entry.path().filename().string();
+                if (!filename.starts_with("lib")) continue;
+                // libSDL3.a → SDL3
+                auto lib_name = filename.substr(3, filename.size() - 5);
+                // Replace -lSDL3 with full path to .a
+                std::string flag = "-l" + lib_name;
+                auto pos = compile_cmd.find(flag);
+                if (pos != std::string::npos) {
+                    // Make sure it's a standalone flag (not part of a longer name)
+                    auto after = pos + flag.size();
+                    if (after >= compile_cmd.size() || compile_cmd[after] == ' ') {
+                        compile_cmd.replace(pos, flag.size(), entry.path().string());
+                    }
                 }
             }
         }
 
+        // Use system compiler directly for production builds.
+        // -static-libgcc -static-libstdc++ eliminates C++ runtime dependency.
+        // All .a files from .cpm/lib/ are linked by path (statically).
+        // [libs] .so entries (GL, GLEW) remain dynamic and are bundled into dist/.
+        NixEnv nix(local_cpm_dir_, global_cache_dir_);
+
         std::cout.flush();
-        int ret;
-        // For production builds: use system compiler directly (same GCC that built .a files)
-        // Don't use nix-shell here — it has a different GCC version causing LTO mismatch
-        // Only use nix-shell if linking requires .so files not in .cpm/lib/
-        bool has_seastar = std::filesystem::exists(local_cpm_dir_ / "lib" / "libseastar.a");
-        if (!shell_nix_path.empty() && has_seastar) {
-            // Seastar needs nix .so at link time — but WITHOUT -flto (version mismatch)
-            std::string nix_cmd = "nix-shell " + shell_nix_path.string() + " --run \'" + compile_cmd + "\' 2>&1";
-            ret = std::system(nix_cmd.c_str());
-        } else {
+        int ret = std::system(compile_cmd.c_str());
+
+        // If static linking failed, fall back to dynamic with bundling
+        if (ret != 0) {
+            std::cout << "[cpm] Static linking failed, falling back to dynamic + bundle...\n";
+            // Remove static flags and retry
+            compile_cmd = build_compile_command(config);
+            spc = compile_cmd.find(' ');
+            if (spc != std::string::npos) {
+                compile_cmd.insert(spc, " -O3 -DNDEBUG -march=x86-64-v2 -static-libgcc -static-libstdc++");
+            }
             ret = std::system(compile_cmd.c_str());
         }
 
@@ -1900,17 +1940,35 @@ int PackageManager::build(bool static_build) {
         auto out = get_output_path(config);
         std::system(("strip " + out.string() + " 2>/dev/null").c_str());
 
-        // Bundle shared libs into dist/ for portability
+        // Bundle into dist/
         auto dist_dir = project_root_ / "dist";
         std::filesystem::create_directories(dist_dir);
         std::filesystem::copy(out, dist_dir / out.filename(), std::filesystem::copy_options::overwrite_existing);
 
-        // Copy required .so files
-        std::string ldd_cmd = "ldd " + out.string() +
-                              " 2>/dev/null | grep nix | awk \'{print $3}\' | "
-                              "xargs -I{} cp {} " +
-                              dist_dir.string() + "/ 2>/dev/null";
-        std::system(ldd_cmd.c_str());
+        // For portability: DON'T bundle system .so files (GL, X11, GLEW, etc.)
+        // These are tied to the host's glibc version and GPU drivers.
+        // The target system must provide its own GL/X11 libraries.
+        // We only bundle .so files from .cpm/lib/ that were built from source
+        // (these are compiled against our code and don't have glibc version issues).
+        if (std::filesystem::exists(lib_dir)) {
+            for (const auto &entry : std::filesystem::directory_iterator(lib_dir)) {
+                if (!entry.is_regular_file() && !entry.is_symlink()) continue;
+                auto filename = entry.path().filename().string();
+                // Only bundle .so files that are NOT nix symlinks (those point to /nix/store/)
+                if (filename.find(".so") == std::string::npos) continue;
+                auto target = entry.path();
+                if (std::filesystem::is_symlink(entry.path())) {
+                    auto link_target = std::filesystem::read_symlink(entry.path()).string();
+                    if (link_target.find("/nix/store/") != std::string::npos) continue;
+                    if (link_target.find("/usr/") != std::string::npos) continue;
+                }
+                // Copy non-system .so files (from source builds)
+                auto dest = dist_dir / filename;
+                if (!std::filesystem::exists(dest)) {
+                    std::filesystem::copy(entry.path(), dest, std::filesystem::copy_options::overwrite_existing);
+                }
+            }
+        }
 
         // Create run script that sets LD_LIBRARY_PATH
         auto run_script = dist_dir / "run.sh";
@@ -1923,8 +1981,8 @@ int PackageManager::build(bool static_build) {
         std::filesystem::permissions(run_script,
             std::filesystem::perms::owner_all | std::filesystem::perms::group_read | std::filesystem::perms::group_exec | std::filesystem::perms::others_read | std::filesystem::perms::others_exec);
 
-        auto size = std::filesystem::file_size(out);
-        std::cout << "[cpm] Built: " << out.filename().string() << " (" << (size / 1024 / 1024) << " MB, optimized)\n";
+        auto size = std::filesystem::file_size(dist_dir / out.filename());
+        std::cout << "[cpm] Built: " << out.filename().string() << " (" << (size / 1024 / 1024) << " MB, static)\n";
         std::cout << "[cpm] Bundle: dist/ (portable, copy to any Linux)\n";
         std::cout << "[cpm]   Run with: ./dist/run.sh\n";
         return 0;
