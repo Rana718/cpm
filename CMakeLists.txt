@@ -8,8 +8,20 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Pass version to source code
 add_compile_definitions(CPM_VERSION="${PROJECT_VERSION}")
 
-# Source files
-file(GLOB_RECURSE CPM_SOURCES "src/*.cpp")
+# All source files (explicit list — safer than GLOB for incremental builds)
+set(CPM_SOURCES
+    src/main.cpp
+    src/package_manager.cpp
+    src/installer.cpp
+    src/builder.cpp
+    src/downloader.cpp
+    src/toml_parser.cpp
+    src/resolver.cpp
+    src/environment.cpp
+    src/nix_env.cpp
+    src/config.cpp
+    src/progress.cpp
+)
 
 add_executable(cpm ${CPM_SOURCES})
 

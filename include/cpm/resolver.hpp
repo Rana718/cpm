@@ -6,7 +6,6 @@
 namespace cpm {
 
 // Resolver exports package headers into .cpm/include/
-// and generates compile_commands.json so clangd (used by Zed, VS Code, etc.)
 // resolves all includes without errors.
 class Resolver {
   public:

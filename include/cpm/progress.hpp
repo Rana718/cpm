@@ -18,10 +18,6 @@ struct TaskProgress {
     std::string detail;
 };
 
-// Displays live progress like uv/bun
-// Shows: ◐ downloading json...
-//        ✓ hiredis (cached)
-//        ◑ building yaml-cpp...
 class ProgressDisplay {
   public:
     ProgressDisplay();

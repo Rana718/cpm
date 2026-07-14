@@ -2,7 +2,6 @@
 
 #include <filesystem>
 #include <fstream>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -57,16 +56,22 @@ ProjectConfig TomlParser::parse(const std::filesystem::path &toml_path) {
         if (key.empty()) continue;
 
         if (current_section == "project") {
-            if (key == "name")             config.name = value;
-            else if (key == "version")     config.version = value;
-            else if (key == "description") config.description = value;
-            else if (key == "cpp_standard") config.cpp_standard = value;
-            else if (key == "compiler")    config.compiler = value;
-            else if (key == "entry")       config.entry = value;
-            else if (key == "output")      config.output = value;
+            if (key == "name")
+                config.name = value;
+            else if (key == "version")
+                config.version = value;
+            else if (key == "description")
+                config.description = value;
+            else if (key == "cpp_standard")
+                config.cpp_standard = value;
+            else if (key == "compiler")
+                config.compiler = value;
+            else if (key == "entry")
+                config.entry = value;
+            else if (key == "output")
+                config.output = value;
 
         } else if (current_section == "dependencies") {
-            // Header-only: name = "github:user/repo@version"
             GitDependency dep;
             dep.name = key;
             std::string url = value;
@@ -74,15 +79,14 @@ ProjectConfig TomlParser::parse(const std::filesystem::path &toml_path) {
             auto at = url.find('@');
             if (at != std::string::npos) {
                 dep.github_url = "https://github.com/" + url.substr(0, at);
-                dep.version    = url.substr(at + 1);
+                dep.version = url.substr(at + 1);
             } else {
                 dep.github_url = "https://github.com/" + url;
-                dep.version    = "*";
+                dep.version = "*";
             }
             config.git_dependencies.push_back(dep);
 
         } else if (current_section == "system-dependencies") {
-            // Built from source: name = "github:user/repo@version"
             SystemDependency dep;
             dep.name = key;
             std::string url = value;
@@ -90,20 +94,16 @@ ProjectConfig TomlParser::parse(const std::filesystem::path &toml_path) {
             auto at = url.find('@');
             if (at != std::string::npos) {
                 dep.github_url = "https://github.com/" + url.substr(0, at);
-                dep.version    = url.substr(at + 1);
+                dep.version = url.substr(at + 1);
             } else {
                 dep.github_url = "https://github.com/" + url;
-                dep.version    = "*";
+                dep.version = "*";
             }
             config.system_dependencies.push_back(dep);
 
         } else if (current_section == "libs") {
-            // Nix system libraries: name = "nix_attr"  (or just name = "name")
-            // e.g.  glew = "glew"
-            //       opengl = "libGL"
-            //       vulkan = "vulkan-loader"
-            NixLibrary lib;
-            lib.name     = key;
+           NixLibrary lib;
+            lib.name = key;
             lib.nix_attr = value.empty() ? key : value;
             config.nix_libraries.push_back(lib);
 
@@ -113,13 +113,12 @@ ProjectConfig TomlParser::parse(const std::filesystem::path &toml_path) {
     }
 
     if (config.cpp_standard.empty()) config.cpp_standard = "20";
-    if (config.output.empty())       config.output = config.name;
+    if (config.output.empty()) config.output = config.name;
 
     return config;
 }
 
-void TomlParser::create_default(const std::filesystem::path &toml_path,
-                                const std::string &project_name) {
+void TomlParser::create_default(const std::filesystem::path &toml_path, const std::string &project_name) {
     std::ofstream file(toml_path);
     if (!file.is_open()) {
         throw std::runtime_error("Cannot create " + toml_path.string());

@@ -1,5 +1,4 @@
 #include "cpm/config.hpp"
-#include <cstdio>
 
 #include <array>
 #include <cstdio>
