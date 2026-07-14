@@ -1864,24 +1864,22 @@ int PackageManager::build(bool static_build) {
             compile_cmd.insert(spc, " -O3 -DNDEBUG -DGLEW_NO_GLU -march=x86-64-v2 -static-libgcc -static-libstdc++");
         }
 
-        // Statically link libm to avoid glibc version dependency from math functions
-        // (sqrtf, sinf, etc. got version-bumped in newer glibc).
-        // Replace dynamic -lm or add static libm.a directly.
-        // Must be linked BEFORE any dynamic libs that also need math.
+        // When building inside nix-shell, libm comes from nix (older glibc).
+        // No need to link the host's libm.a — remove any reference to it.
         {
-            // Find libm.a path
-            std::string libm_path = "/usr/lib/libm.a";
-            if (!std::filesystem::exists(libm_path)) {
-                libm_path = "/usr/lib64/libm.a";
+            // Remove /usr/lib/libm.a from compile command if present
+            auto host_libm = compile_cmd.find("/usr/lib/libm.a");
+            if (host_libm != std::string::npos) {
+                compile_cmd.erase(host_libm, std::string("/usr/lib/libm.a").size());
             }
-            if (std::filesystem::exists(libm_path)) {
-                // Insert static libm before the -o flag so it's resolved early
-                auto out_pos = compile_cmd.find(" -o ");
-                if (out_pos != std::string::npos) {
-                    compile_cmd.insert(out_pos, " " + libm_path);
-                }
-                // Also append at the end to catch any remaining unresolved math symbols
-                compile_cmd += " -Wl,-Bstatic -lm -Wl,-Bdynamic";
+            auto host_libm2 = compile_cmd.find("/usr/lib64/libm.a");
+            if (host_libm2 != std::string::npos) {
+                compile_cmd.erase(host_libm2, std::string("/usr/lib64/libm.a").size());
+            }
+            // Remove -Wl,-Bstatic -lm -Wl,-Bdynamic if present
+            auto bstatic_lm = compile_cmd.find("-Wl,-Bstatic -lm -Wl,-Bdynamic");
+            if (bstatic_lm != std::string::npos) {
+                compile_cmd.erase(bstatic_lm, std::string("-Wl,-Bstatic -lm -Wl,-Bdynamic").size());
             }
         }
 
@@ -1910,14 +1908,45 @@ int PackageManager::build(bool static_build) {
             }
         }
 
-        // Use system compiler directly for production builds.
-        // -static-libgcc -static-libstdc++ eliminates C++ runtime dependency.
-        // All .a files from .cpm/lib/ are linked by path (statically).
-        // [libs] .so entries (GL, GLEW) remain dynamic and are bundled into dist/.
+        // Use nix-shell with a pinned older nixpkgs for production builds.
+        // This ensures the binary works on systems with older glibc (e.g., glibc 2.39+).
+        // The nix-shell provides its own gcc + glibc + all libs, independent of the host.
         NixEnv nix(local_cpm_dir_, global_cache_dir_);
 
         std::cout.flush();
-        int ret = std::system(compile_cmd.c_str());
+        int ret;
+
+        if (nix.available()) {
+            // Generate production shell.nix pinned to nixos-24.05 (glibc 2.39)
+            auto prod_shell_nix = local_cpm_dir_ / "prod_shell.nix";
+            {
+                std::ofstream f(prod_shell_nix);
+                f << "{ pkgs ? import (fetchTarball {\n";
+                f << "    url = \"https://github.com/NixOS/nixpkgs/archive/nixos-24.05.tar.gz\";\n";
+                f << "  }) {} }:\n";
+                f << "pkgs.mkShell {\n";
+                f << "  buildInputs = with pkgs; [\n";
+                f << "    gcc13\n";
+                f << "    pkg-config\n";
+                f << "    zlib\n";
+                for (const auto &nixlib : config.nix_libraries) {
+                    f << "    " << nixlib.nix_attr << "\n";
+                }
+                f << "  ];\n";
+                f << "}\n";
+            }
+
+            std::string nix_cmd = "nix-shell " + prod_shell_nix.string() +
+                                  " --run '" + compile_cmd + "' 2>&1";
+            ret = std::system(nix_cmd.c_str());
+
+            if (ret != 0) {
+                std::cout << "[cpm] Nix production build failed, falling back to system compiler...\n";
+                ret = std::system(compile_cmd.c_str());
+            }
+        } else {
+            ret = std::system(compile_cmd.c_str());
+        }
 
         // If static linking failed, fall back to dynamic with bundling
         if (ret != 0) {
@@ -1945,29 +1974,39 @@ int PackageManager::build(bool static_build) {
         std::filesystem::create_directories(dist_dir);
         std::filesystem::copy(out, dist_dir / out.filename(), std::filesystem::copy_options::overwrite_existing);
 
-        // For portability: DON'T bundle system .so files (GL, X11, GLEW, etc.)
-        // These are tied to the host's glibc version and GPU drivers.
-        // The target system must provide its own GL/X11 libraries.
-        // We only bundle .so files from .cpm/lib/ that were built from source
-        // (these are compiled against our code and don't have glibc version issues).
-        if (std::filesystem::exists(lib_dir)) {
-            for (const auto &entry : std::filesystem::directory_iterator(lib_dir)) {
-                if (!entry.is_regular_file() && !entry.is_symlink()) continue;
-                auto filename = entry.path().filename().string();
-                // Only bundle .so files that are NOT nix symlinks (those point to /nix/store/)
-                if (filename.find(".so") == std::string::npos) continue;
-                auto target = entry.path();
-                if (std::filesystem::is_symlink(entry.path())) {
-                    auto link_target = std::filesystem::read_symlink(entry.path()).string();
-                    if (link_target.find("/nix/store/") != std::string::npos) continue;
-                    if (link_target.find("/usr/") != std::string::npos) continue;
-                }
-                // Copy non-system .so files (from source builds)
-                auto dest = dist_dir / filename;
-                if (!std::filesystem::exists(dest)) {
-                    std::filesystem::copy(entry.path(), dest, std::filesystem::copy_options::overwrite_existing);
-                }
-            }
+        // For portability: bundle .so files from nix that the target won't have.
+        // DON'T bundle:
+        //   - glibc core (libc, libm, libpthread, libdl, librt, ld-linux)
+        //   - GPU driver interface (libGL.so, libGLX.so, libGLdispatch.so)
+        //     These MUST come from the target system to match GPU drivers.
+        // DO bundle everything else from nix (libstdc++, libGLEW, libX11, libOpenGL, etc.)
+        {
+            std::string ldd_cmd = "ldd " + (dist_dir / out.filename()).string() +
+                                  " 2>/dev/null | grep '=>' | awk '{print $3}' | "
+                                  "grep -E '/nix/store/' | "
+                                  "grep -v -E '"
+                                  "libc\\.so|libc-|libm\\.so|libm-|libpthread|libdl\\.so|librt\\.so|"
+                                  "libGL\\.so|libGLX\\.so|libGLdispatch|"
+                                  "libBrokenLocale|libnss|libresolv|libmvec' | "
+                                  "while read lib; do "
+                                  "  if [ -f \"$lib\" ]; then cp \"$lib\" " + dist_dir.string() + "/ 2>/dev/null; fi; "
+                                  "done";
+            std::system(ldd_cmd.c_str());
+        }
+
+        // Fix the binary's interpreter and rpath with patchelf so it doesn't
+        // reference /nix/store/ paths (which won't exist on the target system).
+        {
+            auto dist_bin = dist_dir / out.filename();
+            // Set interpreter to standard system path
+            std::string patch_interp = "patchelf --set-interpreter /lib64/ld-linux-x86-64.so.2 " +
+                                       dist_bin.string() + " 2>/dev/null";
+            std::system(patch_interp.c_str());
+
+            // Set rpath to $ORIGIN so bundled .so files are found
+            std::string patch_rpath = "patchelf --set-rpath '$ORIGIN' " +
+                                      dist_bin.string() + " 2>/dev/null";
+            std::system(patch_rpath.c_str());
         }
 
         // Create run script that sets LD_LIBRARY_PATH
