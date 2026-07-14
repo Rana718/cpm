@@ -488,68 +488,217 @@ seastar = "github:scylladb/seastar"`}
             {/* Dependencies */}
             <Section id="dependencies">
                <Heading>Dependencies</Heading>
+               <p className="text-sm text-muted-foreground mb-4">
+                  CPM supports three types of dependencies, each suited for different use cases.
+                  Choose the right section based on how the library needs to be consumed.
+               </p>
 
-               <SubHeading>Header-only libraries</SubHeading>
+               {/* Decision flowchart */}
+               <div className="rounded-lg border border-border bg-muted/30 px-4 py-4 my-4 text-sm text-muted-foreground font-mono">
+                  <p className="mb-1">Is it header-only? (no .cpp/.c to compile)</p>
+                  <p className="ml-4 text-green-600 dark:text-green-400">YES → [dependencies]</p>
+                  <p className="ml-4">NO ↓</p>
+                  <p className="mb-1">Is it a GitHub project you can build from source?</p>
+                  <p className="ml-4 text-blue-600 dark:text-blue-400">YES → [system-dependencies]</p>
+                  <p className="ml-4">NO ↓</p>
+                  <p className="mb-1">Is it a system/OS-level library (GL, audio, drivers)?</p>
+                  <p className="ml-4 text-purple-600 dark:text-purple-400">YES → [libs] (needs nix)</p>
+               </div>
+
+               {/* [dependencies] */}
+               <SubHeading>[dependencies] — Header-only libraries</SubHeading>
                <p className="text-sm text-muted-foreground mb-2">
-                  These are git-cloned and symlinked into{" "}
-                  <code className="bg-muted px-1 rounded font-mono text-xs">
-                     .cpm/include/
-                  </code>
-                  . Fast — no compilation. Add under{" "}
-                  <code className="bg-muted px-1 rounded font-mono text-xs">
-                     [dependencies]
-                  </code>
-                  .
+                  For libraries that don&apos;t need compilation (just{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">#include</code>).
+                  CPM clones the repo and symlinks headers into{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">.cpm/include/</code>.
+                  This is the fastest option — no build step needed.
                </p>
                <CodeBlock
                   lang="toml"
                   code={`[dependencies]
-json = "github:nlohmann/json@v3.11.3"
-fmt  = "github:fmtlib/fmt"`}
+json  = "github:nlohmann/json@v3.11.3"   # pinned version
+fmt   = "github:fmtlib/fmt"              # latest release tag
+glm   = "github:g-truc/glm@0.9.9.8"
+imgui = "github:ocornut/imgui@docking"   # branch name works too
+stb   = "github:nothings/stb"            # no tags → uses HEAD`}
                />
 
-               <SubHeading>Compiled / system libraries</SubHeading>
+               <p className="text-sm font-medium text-foreground mt-4 mb-2">Common header-only libraries:</p>
+               <div className="overflow-x-auto rounded-lg border border-border my-3">
+                  <table className="w-full text-sm">
+                     <thead>
+                        <tr className="bg-muted border-b border-border">
+                           <th className="text-left px-4 py-2 font-medium text-muted-foreground">Package</th>
+                           <th className="text-left px-4 py-2 font-medium text-muted-foreground">cpm.toml entry</th>
+                        </tr>
+                     </thead>
+                     <tbody className="divide-y divide-border">
+                        {[
+                           ["nlohmann/json", 'json = "github:nlohmann/json@v3.11.3"'],
+                           ["fmtlib/fmt", 'fmt = "github:fmtlib/fmt@10.1.1"'],
+                           ["glm", 'glm = "github:g-truc/glm@0.9.9.8"'],
+                           ["spdlog", 'spdlog = "github:gabime/spdlog@v1.12.0"'],
+                           ["imgui", 'imgui = "github:ocornut/imgui@docking"'],
+                           ["stb", 'stb = "github:nothings/stb"'],
+                           ["entt", 'entt = "github:skypjack/entt@v3.12.2"'],
+                           ["toml++", 'tomlplusplus = "github:marzer/tomlplusplus@v3.4.0"'],
+                           ["Catch2", 'catch2 = "github:catchorg/Catch2@v3.4.0"'],
+                        ].map(([pkg, entry]) => (
+                           <tr key={pkg} className="hover:bg-muted/30">
+                              <td className="px-4 py-2 text-foreground">{pkg}</td>
+                              <td className="px-4 py-2 font-mono text-xs text-primary">{entry}</td>
+                           </tr>
+                        ))}
+                     </tbody>
+                  </table>
+               </div>
+
+               {/* [system-dependencies] */}
+               <SubHeading>[system-dependencies] — Compiled libraries (built from source)</SubHeading>
                <p className="text-sm text-muted-foreground mb-2">
-                  Built from source inside{" "}
-                  <code className="bg-muted px-1 rounded font-mono text-xs">
-                     nix-shell
-                  </code>
-                  . Provides correct compiler + all system deps. Add under{" "}
-                  <code className="bg-muted px-1 rounded font-mono text-xs">
-                     [system-dependencies]
-                  </code>
-                  .
+                  For libraries that produce{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">.a</code> /{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">.so</code>{" "}
+                  files and need to be compiled. CPM clones the source, builds it
+                  (using cmake/make/meson/autotools), and installs artifacts into{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">.cpm/lib/</code>.
+                  If Nix is available, builds run inside{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">nix-shell</code>{" "}
+                  with all transitive dependencies provided automatically.
                </p>
                <CodeBlock
                   lang="toml"
                   code={`[system-dependencies]
-hiredis = "github:redis/hiredis"
-seastar = "github:scylladb/seastar"`}
+hiredis    = "github:redis/hiredis@v1.2.0"
+sdl3       = "github:libsdl-org/SDL@release-3.2.14"
+uwebsocket = "github:uNetworking/uWebSockets@v20.62.0"`}
                />
 
-               <Callout type="tip">
-                  Not sure which to use? If the library is header-only (e.g.
-                  nlohmann/json, Eigen, spdlog) use{" "}
-                  <code className="bg-muted px-1 rounded font-mono text-xs">
-                     [dependencies]
-                  </code>
-                  . If it needs to be compiled (hiredis, grpc, seastar) use{" "}
-                  <code className="bg-muted px-1 rounded font-mono text-xs">
-                     [system-dependencies]
-                  </code>
-                  .
+               <p className="text-sm font-medium text-foreground mt-4 mb-2">Build strategies (tried in order):</p>
+               <ol className="list-decimal list-inside text-sm text-muted-foreground space-y-1 mb-4">
+                  <li><code className="bg-muted px-1 rounded font-mono text-xs">cooking.sh</code> (inside nix-shell if available)</li>
+                  <li><code className="bg-muted px-1 rounded font-mono text-xs">configure.py</code></li>
+                  <li>CMake</li>
+                  <li>Makefile</li>
+                  <li>Meson</li>
+                  <li>Autotools (<code className="bg-muted px-1 rounded font-mono text-xs">./configure</code>)</li>
+                  <li>Header-only fallback (just copies headers)</li>
+               </ol>
+
+               <p className="text-sm font-medium text-foreground mt-4 mb-2">Common compiled libraries:</p>
+               <div className="overflow-x-auto rounded-lg border border-border my-3">
+                  <table className="w-full text-sm">
+                     <thead>
+                        <tr className="bg-muted border-b border-border">
+                           <th className="text-left px-4 py-2 font-medium text-muted-foreground">Package</th>
+                           <th className="text-left px-4 py-2 font-medium text-muted-foreground">cpm.toml entry</th>
+                        </tr>
+                     </thead>
+                     <tbody className="divide-y divide-border">
+                        {[
+                           ["SDL3", 'sdl3 = "github:libsdl-org/SDL@release-3.2.14"'],
+                           ["hiredis", 'hiredis = "github:redis/hiredis@v1.2.0"'],
+                           ["raylib", 'raylib = "github:raysan5/raylib@5.0"'],
+                           ["GLFW", 'glfw = "github:glfw/glfw@3.3.9"'],
+                           ["libcurl", 'curl = "github:curl/curl@curl-8_5_0"'],
+                           ["SQLite", 'sqlite = "github:sqlite/sqlite"'],
+                           ["zlib", 'zlib = "github:madler/zlib@v1.3.1"'],
+                        ].map(([pkg, entry]) => (
+                           <tr key={pkg} className="hover:bg-muted/30">
+                              <td className="px-4 py-2 text-foreground">{pkg}</td>
+                              <td className="px-4 py-2 font-mono text-xs text-primary">{entry}</td>
+                           </tr>
+                        ))}
+                     </tbody>
+                  </table>
+               </div>
+
+               {/* [libs] */}
+               <SubHeading>[libs] — System libraries via Nix</SubHeading>
+               <p className="text-sm text-muted-foreground mb-2">
+                  For system-level libraries (OpenGL, Vulkan, audio drivers, etc.) that are
+                  best provided pre-built by the package manager. CPM uses{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">nix-build</code>{" "}
+                  to fetch pre-compiled binaries and symlinks their headers and{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">.so</code>{" "}
+                  files into{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">.cpm/</code>.
+                  The value is the nixpkgs attribute name.
+               </p>
+               <CodeBlock
+                  lang="toml"
+                  code={`[libs]
+glew     = "glew"
+opengl   = "libGL"
+vulkan   = "vulkan-loader"
+sdl2     = "SDL2"
+openal   = "openal"
+freetype = "freetype"`}
+               />
+               <Callout type="note">
+                  Requires Nix installed (run{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">cpm setup</code>{" "}
+                  to install). Find package names at{" "}
+                  <a href="https://search.nixos.org/packages" target="_blank" rel="noopener noreferrer" className="underline hover:text-foreground">
+                     search.nixos.org/packages
+                  </a>.
                </Callout>
 
+               <p className="text-sm font-medium text-foreground mt-4 mb-2">Common system libraries:</p>
+               <div className="overflow-x-auto rounded-lg border border-border my-3">
+                  <table className="w-full text-sm">
+                     <thead>
+                        <tr className="bg-muted border-b border-border">
+                           <th className="text-left px-4 py-2 font-medium text-muted-foreground">Package</th>
+                           <th className="text-left px-4 py-2 font-medium text-muted-foreground">cpm.toml entry</th>
+                           <th className="text-left px-4 py-2 font-medium text-muted-foreground">Provides</th>
+                        </tr>
+                     </thead>
+                     <tbody className="divide-y divide-border">
+                        {[
+                           ["OpenGL", 'opengl = "libGL"', "-lGL"],
+                           ["GLEW", 'glew = "glew"', "-lGLEW, GL/glew.h"],
+                           ["Vulkan", 'vulkan = "vulkan-loader"', "-lvulkan"],
+                           ["SDL2", 'sdl2 = "SDL2"', "-lSDL2"],
+                           ["FreeType", 'freetype = "freetype"', "-lfreetype"],
+                           ["OpenAL", 'openal = "openal"', "-lopenal"],
+                           ["ALSA", 'alsa = "alsa-lib"', "-lasound"],
+                           ["PulseAudio", 'pulse = "libpulseaudio"', "-lpulse"],
+                           ["X11", 'x11 = "xorg.libX11"', "-lX11"],
+                           ["Wayland", 'wayland = "wayland"', "-lwayland-client"],
+                        ].map(([pkg, entry, provides]) => (
+                           <tr key={pkg} className="hover:bg-muted/30">
+                              <td className="px-4 py-2 text-foreground">{pkg}</td>
+                              <td className="px-4 py-2 font-mono text-xs text-primary">{entry}</td>
+                              <td className="px-4 py-2 font-mono text-xs text-muted-foreground">{provides}</td>
+                           </tr>
+                        ))}
+                     </tbody>
+                  </table>
+               </div>
+
+               {/* Where files go */}
                <SubHeading>Where files go</SubHeading>
                <CodeBlock
                   lang="text"
                   code={`.cpm/
-├── include/        ← symlinked headers
-├── lib/            ← compiled .so files
-├── lib-static/     ← compiled .a files
-├── packages/       ← cloned repos
-└── defines.txt     ← compiler flags`}
+├── include/        ← symlinked headers (all types)
+├── lib/            ← compiled .a and nix .so files
+├── packages/       ← cloned repos ([dependencies])
+├── bin/            ← build tools
+└── defines.txt     ← extra compiler flags
+
+~/.cpm/cache/
+├── <pkg>-<ver>/        ← header-only package cache
+├── <pkg>-<ver>-src/    ← system-dep source cache
+└── <pkg>-<ver>-built/  ← system-dep build cache`}
                />
+               <Callout type="tip">
+                  All dependencies are cached globally in{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">~/.cpm/cache/</code>.
+                  Packages are downloaded once and symlinked to projects — subsequent installs are instant.
+               </Callout>
             </Section>
 
             {/* Build & Run */}

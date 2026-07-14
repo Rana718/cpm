@@ -1037,16 +1037,66 @@ void PackageManager::generate_compile_commands() {
     auto config = TomlParser::parse(toml_path);
     auto include_dir = local_cpm_dir_ / "include";
 
-    // Build the flags string
+    // Build the flags string — must match the actual build logic
     std::string compiler = detect_compiler(config);
     std::string flags = " -std=c++" + config.cpp_standard;
+
+    // .cpm/include and its subdirs
     if (fs::exists(include_dir)) {
         flags += " -I" + include_dir.string();
+        for (const auto &entry : fs::directory_iterator(include_dir)) {
+            if (entry.is_directory()) {
+                flags += " -I" + entry.path().string();
+            }
+        }
     }
+
+    // Extra include paths from cpm.toml
+    for (const auto &inc : config.include_paths) {
+        auto p = fs::path(inc);
+        if (p.is_relative()) p = project_root_ / p;
+        flags += " -I" + p.string();
+    }
+
+    // Auto-discover all header directories in project tree
+    static const std::set<std::string> skip_dirs = {
+        ".cpm", ".git", "build", "_build", "_cpm_build", "dist", "node_modules"
+    };
+    std::set<std::string> seen_dirs;
+    try {
+        for (const auto &entry : fs::recursive_directory_iterator(
+                 project_root_, fs::directory_options::skip_permission_denied)) {
+            if (!entry.is_regular_file()) continue;
+            auto ext = entry.path().extension().string();
+            if (ext != ".h" && ext != ".hpp" && ext != ".hh" && ext != ".hxx") continue;
+            auto rel = fs::relative(entry.path(), project_root_);
+            if (skip_dirs.count(rel.begin()->string())) continue;
+            auto dir = fs::weakly_canonical(entry.path().parent_path()).string();
+            if (seen_dirs.insert(dir).second) {
+                flags += " -I" + dir;
+            }
+        }
+    } catch (...) {}
+
+    // Platform define
+#if defined(__linux__)
+    flags += " -DSEED_PLATFORM_LINUX";
+#elif defined(_WIN32)
+    flags += " -DSEED_PLATFORM_WINDOWS";
+#elif defined(__APPLE__)
+    flags += " -DSEED_PLATFORM_MACOS";
+#endif
 
     // Add defines from .cpm/defines.txt
     auto defines_file = local_cpm_dir_ / "defines.txt";
-    if (fs::exists(defines_file)) {
+    if (!fs::exists(defines_file)) {
+        for (const auto &entry : fs::directory_iterator(local_cpm_dir_)) {
+            if (!entry.is_directory()) continue;
+            auto df = entry.path() / "defines.txt";
+            if (fs::exists(df)) { defines_file = df; break; }
+        }
+    }
+    if (fs::exists(defines_file) && fs::is_regular_file(defines_file)) {
         std::ifstream df(defines_file);
         std::string define;
         while (std::getline(df, define)) {
@@ -1056,26 +1106,19 @@ void PackageManager::generate_compile_commands() {
         }
     }
 
-    // Collect all source files (.cpp, .cc, .cxx)
+    // Collect ALL source files recursively (matching build logic)
     std::vector<fs::path> source_files;
-    for (const auto &entry : fs::directory_iterator(project_root_)) {
-        if (!entry.is_regular_file()) continue;
-        auto ext = entry.path().extension().string();
-        if (ext == ".cpp" || ext == ".cc" || ext == ".cxx") {
-            source_files.push_back(entry.path());
-        }
-    }
-    // Also scan src/ subdirectory if exists
-    auto src_dir = project_root_ / "src";
-    if (fs::exists(src_dir) && fs::is_directory(src_dir)) {
-        for (const auto &entry : fs::recursive_directory_iterator(src_dir)) {
+    try {
+        for (const auto &entry : fs::recursive_directory_iterator(
+                 project_root_, fs::directory_options::skip_permission_denied)) {
             if (!entry.is_regular_file()) continue;
             auto ext = entry.path().extension().string();
-            if (ext == ".cpp" || ext == ".cc" || ext == ".cxx") {
-                source_files.push_back(entry.path());
-            }
+            if (ext != ".cpp" && ext != ".cc" && ext != ".cxx") continue;
+            auto rel = fs::relative(entry.path(), project_root_);
+            if (skip_dirs.count(rel.begin()->string())) continue;
+            source_files.push_back(entry.path());
         }
-    }
+    } catch (...) {}
 
     // If no sources found, at least add the entry file
     if (source_files.empty() && !config.entry.empty()) {
@@ -1088,7 +1131,7 @@ void PackageManager::generate_compile_commands() {
     for (size_t i = 0; i < source_files.size(); ++i) {
         cc << "  {\n";
         cc << R"(    "directory": ")" << project_root_.string() << "\",\n";
-        cc << R"(    "command": ")" << compiler << flags << " -c " << source_files[i].filename().string() << "\",\n";
+        cc << R"(    "command": ")" << compiler << flags << " -c " << source_files[i].string() << "\",\n";
         cc << R"(    "file": ")" << source_files[i].string() << "\"\n";
         cc << "  }";
         if (i + 1 < source_files.size()) cc << ",";
@@ -1135,10 +1178,20 @@ void PackageManager::install() {
     // Auto-remove built libraries not in cpm.toml anymore
     auto lib_dir = local_cpm_dir_ / "lib";
     if (std::filesystem::exists(lib_dir)) {
-        // Collect names of system deps that SHOULD exist
+        // Collect names of system deps and nix libs that SHOULD exist
         std::set<std::string> wanted_libs;
         for (const auto &dep : config.system_dependencies) {
-            wanted_libs.insert(dep.name);
+            std::string lower = dep.name;
+            std::ranges::transform(lower, lower.begin(), ::tolower);
+            wanted_libs.insert(lower);
+        }
+        for (const auto &lib : config.nix_libraries) {
+            std::string lower = lib.name;
+            std::ranges::transform(lower, lower.begin(), ::tolower);
+            wanted_libs.insert(lower);
+            lower = lib.nix_attr;
+            std::ranges::transform(lower, lower.begin(), ::tolower);
+            wanted_libs.insert(lower);
         }
 
         // Check .cpm/lib/ for stale .a files
@@ -1148,16 +1201,17 @@ void PackageManager::install() {
             auto filename = entry.path().filename().string();
             if (entry.path().extension() != ".a") continue;
 
-            // libhiredis.a → hiredis
+            // libSDL3.a → sdl3 (lowercase)
             std::string lib_name = filename;
             if (lib_name.starts_with("lib")) lib_name = lib_name.substr(3);
             auto dot = lib_name.find('.');
             if (dot != std::string::npos) lib_name = lib_name.substr(0, dot);
+            std::string lib_name_lower = lib_name;
+            std::ranges::transform(lib_name_lower, lib_name_lower.begin(), ::tolower);
 
             bool found = false;
             for (const auto &dep_name : wanted_libs) {
-                // Match: dep name "hiredis" matches lib "hiredis" or "usockets" etc.
-                if (lib_name.find(dep_name) != std::string::npos || dep_name.find(lib_name) != std::string::npos) {
+                if (lib_name_lower.find(dep_name) != std::string::npos || dep_name.find(lib_name_lower) != std::string::npos) {
                     found = true;
                     break;
                 }
@@ -1184,6 +1238,12 @@ void PackageManager::install() {
         }
         for (const auto &dep : config.system_dependencies) {
             all_wanted.insert(dep.name);
+        }
+        // Also include [libs] nix package names — their symlinked headers
+        // should NOT be cleaned up
+        for (const auto &lib : config.nix_libraries) {
+            all_wanted.insert(lib.name);
+            all_wanted.insert(lib.nix_attr);
         }
 
         std::vector<std::filesystem::path> includes_to_remove;
@@ -1214,6 +1274,10 @@ void PackageManager::install() {
                         belongs = true;
                         break;
                     }
+                }
+                // Check if symlink target comes from a nix store path (nix [libs])
+                if (!belongs && target.find("/nix/store/") != std::string::npos) {
+                    belongs = true;
                 }
             }
 
@@ -1761,10 +1825,6 @@ std::string PackageManager::build_compile_command(const ProjectConfig &config) c
         }
 
         cmd << " -lz -lpthread -ldl -lrt -latomic";
-        if (fs::exists(lib_dir / "libseastar.a")) {
-            cmd << " -lfmt -lboost_program_options -lboost_thread -lboost_filesystem -lboost_chrono";
-            cmd << " -lyaml-cpp -lhwloc -lgnutls -luring -lnuma -lcares -lprotobuf -lsctp";
-        }
     }
 
     return cmd.str();

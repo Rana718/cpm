@@ -16,3 +16,4 @@ json = "github:nlohmann/json"
 
 [system-dependencies]
 seastar = "github:scylladb/seastar"
+llhttp = "github:nodejs/llhttp"
