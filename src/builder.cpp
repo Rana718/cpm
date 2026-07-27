@@ -318,15 +318,23 @@ void Builder::bundle_production(const ProjectConfig &config) const {
     std::system(("strip " + out.string() + " 2>/dev/null").c_str());
 
     // Bundle nix .so dependencies (exclude glibc and GPU driver interface)
-    std::string ldd_cmd = "ldd " + (dist_dir / out.filename()).string() +
+    // Set LD_LIBRARY_PATH so ldd can resolve libs symlinked from .cpm/lib/
+    std::string cpm_lib = (local_cpm_dir_ / "lib").string();
+    std::string ldd_cmd = "LD_LIBRARY_PATH=" + cpm_lib + ":$LD_LIBRARY_PATH"
+                          " ldd " + (dist_dir / out.filename()).string() +
                           " 2>/dev/null | grep '=>' | awk '{print $3}'"
-                          " | grep -E '/nix/store/'"
+                          " | grep -E '/nix/store/|" + cpm_lib + "'"
                           " | grep -v -E 'libc\\.so|libc-|libm\\.so|libm-|libpthread|libdl\\.so|librt\\.so"
                           "|libGL\\.so|libGLX\\.so|libGLdispatch|libBrokenLocale|libnss|libresolv|libmvec'"
                           " | while read lib; do"
-                          "   [ -f \"$lib\" ] && cp \"$lib\" " +
-                          dist_dir.string() +
-                          "/ 2>/dev/null;"
+                          "   real=$(readlink -f \"$lib\" 2>/dev/null || echo \"$lib\");"
+                          "   [ -f \"$real\" ] && cp \"$real\" " + dist_dir.string() + "/ 2>/dev/null;"
+                          // Also copy the soname symlink (e.g. libfoo.so.1 → libfoo.so.1.2.3)
+                          // so the dynamic linker can find it by its soname.
+                          "   soname=$(objdump -p \"$real\" 2>/dev/null | awk '/SONAME/{print $2}');"
+                          "   if [ -n \"$soname\" ] && [ ! -e \"" + dist_dir.string() + "/$soname\" ]; then"
+                          "     ln -s \"$(basename \"$real\")\" \"" + dist_dir.string() + "/$soname\" 2>/dev/null;"
+                          "   fi;"
                           " done";
     std::system(ldd_cmd.c_str());
 
@@ -371,9 +379,13 @@ int Builder::build(bool static_build) {
 
     if (static_build) {
         auto spc = compile_cmd.find(' ');
+        // Don't use -static-libgcc/-static-libstdc++ when system_dependencies are
+        // present — packages like Seastar redefine unwinding symbols and conflict
+        // with libgcc_eh.a, causing "multiple definition of _Unwind_RaiseException".
+        bool has_sys_deps = !config.system_dependencies.empty();
         if (spc != std::string::npos)
             compile_cmd.insert(spc, " -O3 -DNDEBUG -DGLEW_NO_GLU -march=x86-64-v2"
-                                    " -static-libgcc -static-libstdc++");
+                                    + std::string(has_sys_deps ? "" : " -static-libgcc -static-libstdc++"));
 
         // Replace -l<name> with full .a path for static linking
         auto lib_dir = local_cpm_dir_ / "lib";
@@ -432,7 +444,8 @@ int Builder::build(bool static_build) {
         if (ret != 0) {
             compile_cmd = build_compile_command(config);
             auto spc2 = compile_cmd.find(' ');
-            if (spc2 != std::string::npos) compile_cmd.insert(spc2, " -O3 -DNDEBUG -march=x86-64-v2 -static-libgcc -static-libstdc++");
+            if (spc2 != std::string::npos) compile_cmd.insert(spc2, " -O3 -DNDEBUG -march=x86-64-v2"
+                + std::string(config.system_dependencies.empty() ? " -static-libgcc -static-libstdc++" : ""));
             ret = std::system((compile_cmd + " 2>&1 >/dev/null").c_str());
         }
 
