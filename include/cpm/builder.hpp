@@ -40,9 +40,6 @@ class Builder {
     // Where the output binary goes
     [[nodiscard]] std::filesystem::path get_output_path(const ProjectConfig &config) const;
 
-    // Find shell.nix in the source cache for a system-dep (used to wrap link step)
-    [[nodiscard]] std::filesystem::path find_shell_nix() const;
-
     // Return all header directories under project_root (skip .cpm, .git, build …)
     [[nodiscard]] std::set<std::string> collect_include_dirs(const ProjectConfig &config) const;
 

@@ -7,10 +7,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
-
-#ifdef __linux__
 #include <sys/utsname.h>
-#endif
 
 namespace cpm {
 
@@ -19,12 +16,8 @@ static std::string exec_command(const std::string &cmd) {
     std::string result;
     auto pipe = std::unique_ptr<FILE, int (*)(FILE *)>(popen(cmd.c_str(), "r"), pclose);
     if (!pipe) return "";
-    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-        result += buffer.data();
-    }
-    while (!result.empty() && (result.back() == '\n' || result.back() == '\r')) {
-        result.pop_back();
-    }
+    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) result += buffer.data();
+    while (!result.empty() && (result.back() == '\n' || result.back() == '\r')) result.pop_back();
     return result;
 }
 
@@ -41,12 +34,8 @@ std::filesystem::path Config::get_toml_path() { return std::filesystem::current_
 std::filesystem::path Config::get_resolve_header_path() { return std::filesystem::current_path() / "resolve.h"; }
 
 std::string Config::get_architecture() {
-#ifdef __linux__
-    struct utsname buf;
-    if (uname(&buf) == 0) {
-        return buf.machine;
-    }
-#endif
+    struct utsname buf{};
+    if (uname(&buf) == 0) return buf.machine;
     return exec_command("uname -m");
 }
 
@@ -57,8 +46,6 @@ std::string Config::get_compiler() {
     return "clang";
 #elif defined(__GNUC__)
     return "gcc";
-#elif defined(_MSC_VER)
-    return "msvc";
 #else
     if (std::system("g++ --version > /dev/null 2>&1") == 0) return "gcc";
     if (std::system("clang++ --version > /dev/null 2>&1") == 0) return "clang";
@@ -68,16 +55,15 @@ std::string Config::get_compiler() {
 
 std::string Config::get_compiler_version() {
     std::string compiler = get_compiler();
-    if (compiler == "gcc") {
-        return exec_command("g++ -dumpversion");
-    } else if (compiler == "clang") {
-        return exec_command(R"(clang++ --version 2>&1 | head -1 | grep -oP '\d+\.\d+\.\d+')");
-    }
+    if (compiler == "gcc") return exec_command("g++ -dumpversion");
+    if (compiler == "clang") return exec_command(R"(clang++ --version 2>&1 | head -1 | grep -oP '\d+\.\d+\.\d+')");
     return "unknown";
 }
 
 std::string Config::get_cpp_standard() {
-#if __cplusplus >= 202302L
+#if __cplusplus >= 202600L
+    return "26";
+#elif __cplusplus >= 202302L
     return "23";
 #elif __cplusplus >= 202002L
     return "20";

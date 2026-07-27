@@ -33,6 +33,7 @@ struct ProjectConfig {
     std::string description;
     std::string cpp_standard;
     std::string compiler;
+    std::string nixpkgs;     // pin nixpkgs channel (e.g. "nixos-24.05", "nixos-23.11")
 
     std::string entry;
     std::string output;

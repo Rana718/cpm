@@ -66,6 +66,8 @@ ProjectConfig TomlParser::parse(const std::filesystem::path &toml_path) {
                 config.cpp_standard = value;
             else if (key == "compiler")
                 config.compiler = value;
+            else if (key == "nixpkgs")
+                config.nixpkgs = value;
             else if (key == "entry")
                 config.entry = value;
             else if (key == "output")
@@ -102,7 +104,7 @@ ProjectConfig TomlParser::parse(const std::filesystem::path &toml_path) {
             config.system_dependencies.push_back(dep);
 
         } else if (current_section == "libs") {
-           NixLibrary lib;
+            NixLibrary lib;
             lib.name = key;
             lib.nix_attr = value.empty() ? key : value;
             config.nix_libraries.push_back(lib);

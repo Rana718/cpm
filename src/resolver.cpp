@@ -30,7 +30,6 @@ std::filesystem::path Resolver::find_include_root(const std::filesystem::path &p
             if (entry.is_regular_file()) {
                 auto ext = entry.path().extension().string();
                 if (ext == ".h" || ext == ".hpp" || ext == ".hxx") {
-                    // Return empty to signal "use package name as namespace"
                     return src_dir;
                 }
             }

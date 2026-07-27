@@ -19,8 +19,6 @@ namespace fs = std::filesystem;
 
 PackageManager::PackageManager() : project_root_(fs::current_path()), local_cpm_dir_(project_root_ / ".cpm"), global_cache_dir_(Config::get_global_cache_dir()) {}
 
-// ─── init ────────────────────────────────────────────────────────────────────
-
 void PackageManager::init(const std::string &project_name) {
     std::cout << "[cpm] Initializing project '" << project_name << "'...\n"
               << "[cpm] Architecture: " << Config::get_architecture() << "\n"
@@ -58,8 +56,6 @@ void PackageManager::init(const std::string &project_name) {
               << "  cpm start     # run the built binary\n";
 }
 
-// ─── Delegation — Installer ──────────────────────────────────────────────────
-
 void PackageManager::install() {
     Installer(project_root_, local_cpm_dir_, global_cache_dir_).install();
     generate_compile_commands();
@@ -82,7 +78,7 @@ void PackageManager::update() {
 
 void PackageManager::list() const { Installer(project_root_, local_cpm_dir_, global_cache_dir_).list(); }
 
-// ─── Delegation — Builder ────────────────────────────────────────────────────
+//Delegation — Builder 
 
 int PackageManager::build(bool static_build) { return Builder(project_root_, local_cpm_dir_, global_cache_dir_).build(static_build); }
 
@@ -92,7 +88,7 @@ int PackageManager::run_file(const std::string &file) { return Builder(project_r
 
 int PackageManager::start() { return Builder(project_root_, local_cpm_dir_, global_cache_dir_).start(); }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// Helpers 
 
 void PackageManager::export_package_headers() const { Resolver(project_root_).export_headers(); }
 
@@ -111,9 +107,8 @@ void PackageManager::generate_compile_commands() const {
     // Build flags string
     std::string flags = " -std=c++" + config.cpp_standard;
 
-#if defined(__linux__)
+    // Linux-only build
     flags += " -DSEED_PLATFORM_LINUX";
-#endif
 
     // .cpm/include and subdirs
     if (fs::exists(include_dir)) {

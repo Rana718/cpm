@@ -49,6 +49,17 @@ class Downloader {
     // Derive the nix compiler attribute name from a cpm.toml compiler string
     // e.g. "gcc-13" → "gcc13", "clang-17" → "clang_17"
     static std::string compiler_to_nix_attr(const std::string &compiler);
+
+    // Parse all .pc files in a pkgconfig directory, resolve variable
+    // substitutions, and return every unique -I/nix/store/... path found.
+    static std::vector<std::filesystem::path> collect_pc_nix_includes(
+        const std::filesystem::path &pc_dir);
+
+    // Full version: returns all -I and -D flags found in .pc files, and
+    // separately the nix-store include paths for symlinking into .cpm/include/.
+    static void collect_pc_flags(const std::filesystem::path &pc_dir,
+                                 std::vector<std::string> &out_flags,
+                                 std::vector<std::filesystem::path> &out_nix_incs);
 };
 
 } // namespace cpm

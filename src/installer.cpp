@@ -31,7 +31,6 @@ void Installer::ensure_directories() const {
     fs::create_directories(global_cache_dir_);
 }
 
-// ─── Stale cleanup ──────────────────────────────────────────────────────────
 
 void Installer::auto_remove_stale_packages(const ProjectConfig &config) {
     auto packages_dir = local_cpm_dir_ / "packages";
@@ -135,7 +134,7 @@ void Installer::auto_remove_stale_includes(const ProjectConfig &config) {
     }
 }
 
-// ─── Nix [libs] resolution ──────────────────────────────────────────────────
+// Nix [libs] resolution 
 
 void Installer::resolve_nix_libraries(const ProjectConfig &config) {
     if (config.nix_libraries.empty()) return;
@@ -190,7 +189,7 @@ void Installer::resolve_nix_libraries(const ProjectConfig &config) {
     }
 }
 
-// ─── install ─────────────────────────────────────────────────────────────────
+// install 
 
 void Installer::install() {
     auto toml_path = project_root_ / "cpm.toml";
@@ -204,7 +203,7 @@ void Installer::install() {
     auto_remove_stale_libs(config);
     auto_remove_stale_includes(config);
 
-    // ── Parallel download/install ──────────────────────────────────────────
+    // Parallel download/install 
     ProgressDisplay progress;
     std::mutex install_mutex;
 
@@ -304,7 +303,7 @@ void Installer::install() {
     std::cout << "[cpm] Packages ready.\n";
 }
 
-// ─── install_package ─────────────────────────────────────────────────────────
+// install_package 
 
 void Installer::install_package(const std::string &package_spec) {
     ensure_directories();
@@ -337,7 +336,7 @@ void Installer::install_package(const std::string &package_spec) {
     std::cout << "[cpm] Added " << dep.name << "\n";
 }
 
-// ─── remove_package ──────────────────────────────────────────────────────────
+// remove_package 
 
 void Installer::remove_package(const std::string &package_name) {
     auto package_path = local_cpm_dir_ / "packages" / package_name;
@@ -361,7 +360,6 @@ void Installer::remove_package(const std::string &package_name) {
     std::cout << "[cpm] Removed " << package_name << "\n";
 }
 
-// ─── update ──────────────────────────────────────────────────────────────────
 
 void Installer::update() {
     for (const auto &sub : {"packages", "include", "lib"}) {
@@ -372,7 +370,6 @@ void Installer::update() {
     install();
 }
 
-// ─── list ────────────────────────────────────────────────────────────────────
 
 void Installer::list() const {
     std::cout << "[cpm] Installed packages:\n";

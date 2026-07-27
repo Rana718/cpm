@@ -3,6 +3,7 @@
 #include "cpm/config.hpp"
 #include "cpm/installer.hpp"
 #include "cpm/nix_env.hpp"
+#include "cpm/progress.hpp"
 #include "cpm/toml_parser.hpp"
 
 #include <filesystem>
@@ -20,6 +21,18 @@ namespace cpm {
 
 namespace fs = std::filesystem;
 
+// Return the nix import expression for a given nixpkgs pin.
+// If pin is non-empty (e.g. "nixos-24.05"), use builtins.fetchTarball so the
+// exact channel is used regardless of the host's nix channel configuration.
+// This is critical: on nixpkgs-unstable, gcc13 resolves to GCC 15.
+static std::string nix_pkgs_import(const std::string &pin) {
+    if (!pin.empty()) {
+        std::string url = "https://github.com/NixOS/nixpkgs/archive/" + pin + ".tar.gz";
+        return "{ pkgs ? import (builtins.fetchTarball { url = \"" + url + "\"; }) {} }:\n";
+    }
+    return "{ pkgs ? import <nixpkgs> {} }:\n";
+}
+
 static const std::set<std::string> &skip_dirs() {
     static const std::set<std::string> dirs = {".cpm", ".git", "build", "_build", "_cpm_build", "dist", "node_modules"};
     return dirs;
@@ -28,10 +41,16 @@ static const std::set<std::string> &skip_dirs() {
 Builder::Builder(fs::path project_root, fs::path local_cpm_dir, fs::path global_cache_dir)
     : project_root_(std::move(project_root)), local_cpm_dir_(std::move(local_cpm_dir)), global_cache_dir_(std::move(global_cache_dir)) {}
 
-// ─── detect_compiler ────────────────────────────────────────────────────────
 
 std::string Builder::detect_compiler(const ProjectConfig &config) const {
-    if (!config.compiler.empty()) return config.compiler;
+    if (!config.compiler.empty()) {
+        std::string comp = config.compiler;
+        // Map "gcc-13", "gcc-14", "gcc" → "g++" (nix-shell provides the right version)
+        // Map "clang-17", "clang" → "clang++"
+        if (comp == "gcc" || comp.starts_with("gcc-")) return "g++";
+        if (comp == "clang" || comp.starts_with("clang-")) return "clang++";
+        return comp;
+    }
     std::string det = Config::get_compiler();
     if (det == "gcc") return "g++";
     if (det == "clang") return "clang++";
@@ -40,19 +59,7 @@ std::string Builder::detect_compiler(const ProjectConfig &config) const {
 
 fs::path Builder::get_output_path(const ProjectConfig &config) const { return project_root_ / (config.output.empty() ? config.name : config.output); }
 
-// ─── find_shell_nix ─────────────────────────────────────────────────────────
 
-fs::path Builder::find_shell_nix() const {
-    if (!fs::exists(global_cache_dir_)) return {};
-    for (const auto &entry : fs::directory_iterator(global_cache_dir_)) {
-        if (entry.path().filename().string().find("-src") == std::string::npos) continue;
-        auto snix = entry.path() / "shell.nix";
-        if (fs::exists(snix)) return snix;
-    }
-    return {};
-}
-
-// ─── collect_include_dirs ───────────────────────────────────────────────────
 
 std::set<std::string> Builder::collect_include_dirs(const ProjectConfig &config) const {
     std::set<std::string> seen;
@@ -81,7 +88,6 @@ std::set<std::string> Builder::collect_include_dirs(const ProjectConfig &config)
     return seen;
 }
 
-// ─── collect_source_files ───────────────────────────────────────────────────
 
 std::vector<fs::path> Builder::collect_source_files(const std::string &entry_abs) const {
     std::vector<fs::path> sources;
@@ -100,20 +106,18 @@ std::vector<fs::path> Builder::collect_source_files(const std::string &entry_abs
     return sources;
 }
 
-// ─── backend_is_available ───────────────────────────────────────────────────
 
 bool Builder::backend_is_available(const std::string &stem) const {
     auto include_dir = local_cpm_dir_ / "include";
     if (stem == "imgui_impl_sdl3" || stem == "imgui_impl_sdlrenderer3" || stem == "imgui_impl_sdlgpu3") return fs::exists(include_dir / "SDL3");
     if (stem == "imgui_impl_opengl3") return true;
-    if (stem == "imgui_impl_opengl2") return false; // conflicts with opengl3
+    if (stem == "imgui_impl_opengl2") return false; 
     if (stem == "imgui_impl_glfw") return fs::exists(include_dir / "GLFW");
     if (stem == "imgui_impl_vulkan") return fs::exists(include_dir / "vulkan");
     if (stem == "imgui_impl_null") return true;
     return false; // dx*, allegro5, android, metal, osx, win32, sdl2, wgpu
 }
 
-// ─── auto_patch_sources ─────────────────────────────────────────────────────
 
 void Builder::auto_patch_sources() const {
     // Fix: `m_Matrix = (1.0f);` → `m_Matrix = glm::mat4(1.0f);`
@@ -142,7 +146,6 @@ void Builder::auto_patch_sources() const {
     }
 }
 
-// ─── build_compile_command ───────────────────────────────────────────────────
 
 std::string Builder::build_compile_command(const ProjectConfig &config) const {
     std::ostringstream cmd;
@@ -151,13 +154,8 @@ std::string Builder::build_compile_command(const ProjectConfig &config) const {
     cmd << detect_compiler(config);
     cmd << " -std=c++" << config.cpp_standard;
 
-#if defined(__linux__)
+    // Linux-only build
     cmd << " -DSEED_PLATFORM_LINUX";
-#elif defined(_WIN32)
-    cmd << " -DSEED_PLATFORM_WINDOWS";
-#elif defined(__APPLE__)
-    cmd << " -DSEED_PLATFORM_MACOS";
-#endif
 
     if (fs::exists(include_dir)) {
         cmd << " -I" << include_dir.string();
@@ -176,7 +174,7 @@ std::string Builder::build_compile_command(const ProjectConfig &config) const {
     // Auto-discovered header dirs
     for (const auto &dir : collect_include_dirs(config)) cmd << " -I" << dir;
 
-    // defines.txt (e.g. Seastar flags)
+    // defines.txt 
     auto defines_file = local_cpm_dir_ / "defines.txt";
     if (!fs::exists(defines_file)) {
         for (const auto &entry : fs::directory_iterator(local_cpm_dir_)) {
@@ -195,7 +193,7 @@ std::string Builder::build_compile_command(const ProjectConfig &config) const {
             if (!line.empty() && line[0] == '-') cmd << " " << line;
     }
 
-    // ── Entry file handling ───────────────────────────────────────────────
+    //  Entry file handling 
     std::string actual_entry;
     {
         auto entry_ext = fs::path(config.entry).extension().string();
@@ -213,14 +211,13 @@ std::string Builder::build_compile_command(const ProjectConfig &config) const {
                 wf << "#include \"" << abs.string() << "\"\n";
                 actual_entry = wrapper.string();
             }
-            // else: no entry file — .cpp files include the header themselves
         } else {
             actual_entry = fs::weakly_canonical(project_root_ / config.entry).string();
         }
     }
     if (!actual_entry.empty()) cmd << " " << actual_entry;
 
-    // ── ImGui backends ────────────────────────────────────────────────────
+    //  ImGui backends 
     auto backends_dir = include_dir / "backends";
     std::set<std::string> extra_src_abs;
 
@@ -264,10 +261,9 @@ std::string Builder::build_compile_command(const ProjectConfig &config) const {
         if (!extra_src_abs.count(abs)) cmd << " " << src.string();
     }
 
-    // ── Output ────────────────────────────────────────────────────────────
     cmd << " -o " << get_output_path(config).string();
 
-    // ── Link .cpm/lib/ ────────────────────────────────────────────────────
+    //  Link .cpm/lib/ 
     auto lib_dir = local_cpm_dir_ / "lib";
     if (fs::exists(lib_dir)) {
         cmd << " -L" << lib_dir.string();
@@ -310,7 +306,6 @@ std::string Builder::build_compile_command(const ProjectConfig &config) const {
     return cmd.str();
 }
 
-// ─── bundle_production ───────────────────────────────────────────────────────
 
 void Builder::bundle_production(const ProjectConfig &config) const {
     auto out = get_output_path(config);
@@ -357,7 +352,6 @@ void Builder::bundle_production(const ProjectConfig &config) const {
               << "[cpm]   Run with: ./dist/run.sh\n";
 }
 
-// ─── build ───────────────────────────────────────────────────────────────────
 
 int Builder::build(bool static_build) {
     auto toml_path = project_root_ / "cpm.toml";
@@ -372,12 +366,10 @@ int Builder::build(bool static_build) {
     auto_patch_sources();
     std::string compile_cmd = build_compile_command(config);
 
-    // ── Production build ──────────────────────────────────────────────────
-    if (static_build) {
-        std::cout << "[cpm] Building " << config.name << " (production, static)...\n[cpm] " << detect_compiler(config) << " | c++" << config.cpp_standard << " | " << Config::get_architecture()
-                  << " | optimized\n";
+    std::string compiler = detect_compiler(config);
+    std::string detail = "c++" + config.cpp_standard + " · " + compiler;
 
-        // Insert optimisation flags right after the compiler name
+    if (static_build) {
         auto spc = compile_cmd.find(' ');
         if (spc != std::string::npos)
             compile_cmd.insert(spc, " -O3 -DNDEBUG -DGLEW_NO_GLU -march=x86-64-v2"
@@ -401,77 +393,120 @@ int Builder::build(bool static_build) {
             }
         }
 
+        BuildSpinner spinner(config.name, detail + " · optimized");
         NixEnv nix(local_cpm_dir_, global_cache_dir_);
         int ret = -1;
 
         if (nix.available()) {
-            // Pinned nixos-24.05 for glibc 2.39 compatibility
+            // Generate a minimal mkShell (not mkDerivation) so the compiler
+            // is on PATH when the compile command runs inside nix-shell.
             auto prod_shell = local_cpm_dir_ / "prod_shell.nix";
             {
+                std::string nix_compiler = "gcc13";
+                if (!config.compiler.empty()) {
+                    // compiler field like "gcc-13" → "gcc13", "clang-17" → "clang_17"
+                    auto &c = config.compiler;
+                    if (c.find("clang") != std::string::npos) {
+                        auto d = c.find('-');
+                        nix_compiler = d != std::string::npos ? "clang_" + c.substr(d + 1) : "clang";
+                    } else {
+                        auto d = c.find('-');
+                        nix_compiler = d != std::string::npos ? "gcc" + c.substr(d + 1) : "gcc";
+                    }
+                }
                 std::ofstream f(prod_shell);
-                f << "{ pkgs ? import (fetchTarball {\n"
-                  << "    url = \"https://github.com/NixOS/nixpkgs/archive/nixos-24.05.tar.gz\";\n"
-                  << "  }) {} }:\n"
+                f << nix_pkgs_import(config.nixpkgs)
                   << "pkgs.mkShell {\n"
-                  << "  buildInputs = with pkgs; [ gcc13 pkg-config zlib";
+                  << "  buildInputs = with pkgs; [ " << nix_compiler << " pkg-config zlib";
                 for (const auto &nixlib : config.nix_libraries) f << " " << nixlib.nix_attr;
                 f << " ];\n}\n";
             }
-            std::string nix_cmd = "nix-shell " + prod_shell.string() + " --run '" + compile_cmd + "' 2>&1";
-            ret = std::system(nix_cmd.c_str());
-            if (ret != 0) {
-                std::cout << "[cpm] Nix production build failed, "
-                             "falling back to system compiler...\n";
-                ret = std::system(compile_cmd.c_str());
-            }
+            ret = std::system(("nix-shell " + prod_shell.string() + " --run '" + compile_cmd + "' 2>&1 >/dev/null").c_str());
+
+            if (ret != 0) ret = std::system((compile_cmd + " 2>&1 >/dev/null").c_str());
         } else {
-            ret = std::system(compile_cmd.c_str());
+            ret = std::system((compile_cmd + " 2>&1 >/dev/null").c_str());
         }
 
-        // Fallback to dynamic+bundle if full static fails
+        // Fallback: dynamic + bundle
         if (ret != 0) {
-            std::cout << "[cpm] Static linking failed, falling back to dynamic + bundle...\n";
             compile_cmd = build_compile_command(config);
             auto spc2 = compile_cmd.find(' ');
             if (spc2 != std::string::npos) compile_cmd.insert(spc2, " -O3 -DNDEBUG -march=x86-64-v2 -static-libgcc -static-libstdc++");
-            ret = std::system(compile_cmd.c_str());
+            ret = std::system((compile_cmd + " 2>&1 >/dev/null").c_str());
         }
 
-        if (ret != 0) {
-            std::cerr << "[cpm] Production build failed.\n";
-            return 1;
-        }
+        spinner.finish(ret == 0);
 
+        if (ret != 0) return 1;
         bundle_production(config);
         return 0;
     }
 
-    // ── Regular build ─────────────────────────────────────────────────────
-    std::cout << "[cpm] Building " << config.name << "...\n"
-              << "[cpm] " << detect_compiler(config) << " | c++" << config.cpp_standard << " | " << Config::get_architecture() << "\n";
-
-    // Wrap in nix-shell if a system-dep used nix (for linker access)
+    //  Regular build
+    // All deps are already built and their artifacts are in .cpm/include and
+    // .cpm/lib.  We only need a nix-shell wrapper for the final compile if:
+    //   • nix is available, AND
+    //   • the project uses [libs] or [system-dependencies], AND
+    //   • the compiler requested in cpm.toml differs from the system compiler
+    //     (i.e., the user wants a specific nix-provided compiler version).
+    // In all other cases, run the compile command directly.
     NixEnv nix(local_cpm_dir_, global_cache_dir_);
-    fs::path shell_nix_path;
-    if (nix.available() && !config.system_dependencies.empty()) shell_nix_path = find_shell_nix();
 
-    std::cout.flush();
+    // Build a project-level shell.nix in .cpm/ so the correct nix compiler is
+    // on PATH when linking against the artifacts in .cpm/lib.
+    fs::path shell_nix_path;
+    bool needs_nix_compiler = !config.compiler.empty() &&
+                              (config.compiler.find('-') != std::string::npos); // e.g. "gcc-13"
+    if (nix.available() && (!config.system_dependencies.empty() || !config.nix_libraries.empty() || needs_nix_compiler)) {
+        // Derive nix compiler attr from cpm.toml compiler field
+        std::string nix_compiler = "gcc13"; // default
+        if (!config.compiler.empty()) {
+            auto &c = config.compiler;
+            if (c.find("clang") != std::string::npos) {
+                auto d = c.find('-');
+                nix_compiler = d != std::string::npos ? "clang_" + c.substr(d + 1) : "clang";
+            } else {
+                auto d = c.find('-');
+                nix_compiler = d != std::string::npos ? "gcc" + c.substr(d + 1) : "gcc";
+            }
+        }
+        auto proj_shell = local_cpm_dir_ / "project_shell.nix";
+        {
+            std::ofstream f(proj_shell);
+            f << nix_pkgs_import(config.nixpkgs)
+              << "pkgs.mkShell {\n"
+              << "  buildInputs = with pkgs; [ " << nix_compiler << " pkg-config zlib";
+            for (const auto &nixlib : config.nix_libraries) f << " " << nixlib.nix_attr;
+            f << " ];\n}\n";
+        }
+        shell_nix_path = proj_shell;
+    }
+
+    BuildSpinner spinner(config.name, detail);
+
     int ret;
     if (!shell_nix_path.empty()) {
-        ret = std::system(("nix-shell " + shell_nix_path.string() + " --run '" + compile_cmd + "' 2>&1").c_str());
+        ret = std::system(("nix-shell " + shell_nix_path.string() + " --run '" + compile_cmd + "' 2>&1 >/dev/null").c_str());
     } else {
-        ret = std::system(compile_cmd.c_str());
+        ret = std::system((compile_cmd + " 2>&1 >/dev/null").c_str());
     }
 
+    spinner.finish(ret == 0);
+
     if (ret != 0) {
-        std::cerr << "[cpm] Build failed.\n";
+        // Re-run without output suppression so the user sees the compiler error
+        std::cerr << "\n[cpm] Compiler output:\n";
+        if (!shell_nix_path.empty()) {
+            std::system(("nix-shell " + shell_nix_path.string() + " --run '" + compile_cmd + "'").c_str());
+        } else {
+            std::system(compile_cmd.c_str());
+        }
         return 1;
     }
-    std::cout << "[cpm] Built: " << get_output_path(config).filename().string() << "\n";
     return 0;
 }
 
-// ─── run ─────────────────────────────────────────────────────────────────────
 
 int Builder::run() {
     auto toml_path = project_root_ / "cpm.toml";
@@ -513,11 +548,14 @@ int Builder::run() {
               << "────────────────────────────────────────\n";
     std::cout.flush();
 
-    int ret = std::system(output_path.string().c_str());
+    // Prepend .cpm/lib/ to LD_LIBRARY_PATH so nix-store .so symlinks are found
+    // at runtime without needing a nix-shell or system-wide installation.
+    std::string run_cmd = "LD_LIBRARY_PATH=" + (local_cpm_dir_ / "lib").string()
+                        + ":$LD_LIBRARY_PATH " + output_path.string();
+    int ret = std::system(run_cmd.c_str());
     return WEXITSTATUS(ret);
 }
 
-// ─── run_file ────────────────────────────────────────────────────────────────
 
 int Builder::run_file(const std::string &file) {
     auto file_path = project_root_ / file;
@@ -564,21 +602,31 @@ int Builder::run_file(const std::string &file) {
 
     std::string cmd = compiler + std_flag + include_flag + defines + " " + file + " -o " + out_path.string();
 
-    std::cout << "[cpm] " << compiler << " " << file << "\n";
-
-    // Wrap in nix-shell if project uses nix
+    // Wrap in nix-shell if project uses nix (use project-level shell, not a dep's shell)
     NixEnv nix(local_cpm_dir_, global_cache_dir_);
     fs::path shell_nix;
-    if (nix.available() && fs::exists(toml_path)) shell_nix = find_shell_nix();
+    if (nix.available() && fs::exists(toml_path)) {
+        // Reuse project_shell.nix if already generated by cpm build/install
+        auto proj_shell = local_cpm_dir_ / "project_shell.nix";
+        if (fs::exists(proj_shell)) shell_nix = proj_shell;
+    }
 
+    BuildSpinner spinner(fs::path(file).stem().string(), std::string(is_cpp ? "c++" : "c") + " · " + compiler);
     int ret;
-    if (!shell_nix.empty())
-        ret = std::system(("nix-shell " + shell_nix.string() + " --run '" + cmd + "' 2>&1").c_str());
-    else
-        ret = std::system(cmd.c_str());
+    if (!shell_nix.empty()) {
+        ret = std::system(("nix-shell " + shell_nix.string() + " --run '" + cmd + "' >/dev/null 2>&1").c_str());
+    } else {
+        ret = std::system((cmd + " >/dev/null 2>&1").c_str());
+    }
+
+    spinner.finish(ret == 0);
 
     if (ret != 0) {
-        std::cerr << "[cpm] Compilation failed.\n";
+        std::cerr << "\n[cpm] Compiler output:\n";
+        if (!shell_nix.empty())
+            std::system(("nix-shell " + shell_nix.string() + " --run '" + cmd + "'").c_str());
+        else
+            std::system(cmd.c_str());
         return 1;
     }
 
@@ -589,7 +637,6 @@ int Builder::run_file(const std::string &file) {
     return WEXITSTATUS(ret);
 }
 
-// ─── start ───────────────────────────────────────────────────────────────────
 
 int Builder::start() {
     auto toml_path = project_root_ / "cpm.toml";
