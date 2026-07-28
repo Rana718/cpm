@@ -384,8 +384,12 @@ int Builder::build(bool static_build) {
         // with libgcc_eh.a, causing "multiple definition of _Unwind_RaiseException".
         bool has_sys_deps = !config.system_dependencies.empty();
         if (spc != std::string::npos)
-            compile_cmd.insert(spc, " -O3 -DNDEBUG -DGLEW_NO_GLU -march=x86-64-v2"
-                                    + std::string(has_sys_deps ? "" : " -static-libgcc -static-libstdc++"));
+            // Avoid -march=x86-64-v2 and stack protector flags when system_dependencies
+            // are present: pre-built nix libraries (GCC 13) have a different stack
+            // canary ABI than GCC 16, causing stack smashing false positives.
+            compile_cmd.insert(spc, " -O3 -DNDEBUG -DGLEW_NO_GLU"
+                + std::string(has_sys_deps ? " -fno-stack-protector" : " -march=x86-64-v2")
+                + std::string(has_sys_deps ? "" : " -static-libgcc -static-libstdc++"));
 
         // Replace -l<name> with full .a path for static linking
         auto lib_dir = local_cpm_dir_ / "lib";
@@ -444,8 +448,8 @@ int Builder::build(bool static_build) {
         if (ret != 0) {
             compile_cmd = build_compile_command(config);
             auto spc2 = compile_cmd.find(' ');
-            if (spc2 != std::string::npos) compile_cmd.insert(spc2, " -O3 -DNDEBUG -march=x86-64-v2"
-                + std::string(config.system_dependencies.empty() ? " -static-libgcc -static-libstdc++" : ""));
+            if (spc2 != std::string::npos) compile_cmd.insert(spc2, " -O3 -DNDEBUG"
+                + std::string(config.system_dependencies.empty() ? " -march=x86-64-v2 -static-libgcc -static-libstdc++" : ""));
             ret = std::system((compile_cmd + " 2>&1 >/dev/null").c_str());
         }
 
@@ -491,6 +495,48 @@ int Builder::build(bool static_build) {
               << "pkgs.mkShell {\n"
               << "  buildInputs = with pkgs; [ " << nix_compiler << " pkg-config zlib";
             for (const auto &nixlib : config.nix_libraries) f << " " << nixlib.nix_attr;
+            // Add transitive deps from each system_dependency's shell.nix so
+            // the nix linker can find gnutls, hwloc, etc. during the user's build.
+            for (const auto &dep : config.system_dependencies) {
+                auto dep_shell = global_cache_dir_ / (dep.name + "-" + dep.version + "-src") / "shell.nix";
+                if (!fs::exists(dep_shell)) {
+                    // Try resolved version
+                    for (const auto &entry : fs::directory_iterator(global_cache_dir_)) {
+                        auto name = entry.path().filename().string();
+                        if (name.rfind(dep.name + "-", 0) == 0 && name.find("-src") != std::string::npos) {
+                            dep_shell = entry.path() / "shell.nix";
+                            break;
+                        }
+                    }
+                }
+                if (!fs::exists(dep_shell)) continue;
+                // Parse buildInputs from the dep's shell.nix and include them
+                std::ifstream sf(dep_shell);
+                std::string line;
+                bool in_inputs = false;
+                while (std::getline(sf, line)) {
+                    if (line.find("buildInputs") != std::string::npos) { in_inputs = true; }
+                    if (!in_inputs) continue;
+                    if (line.find("];") != std::string::npos) { in_inputs = false; break; }
+                    // Extract package names (words that look like nix attrs)
+                    std::istringstream ss(line);
+                    std::string tok;
+                    while (ss >> tok) {
+                        // Skip keywords and the compiler (already added)
+                        if (tok == "with" || tok == "pkgs;" || tok == "[" || tok == "]"
+                            || tok == "buildInputs" || tok == "=" || tok.find("gcc") == 0
+                            || tok.find("clang") == 0 || tok == "cmake" || tok == "ninja"
+                            || tok == "pkg-config" || tok == "automake" || tok == "autoconf"
+                            || tok == "libtool" || tok == "python3" || tok == "git"
+                            || tok == "stow" || tok == "meson" || tok == "valgrind"
+                            || tok == "xorg.utilmacros" || tok == "xfsprogs"
+                            || tok.find("pyelftools") != std::string::npos)
+                            continue;
+                        if (!tok.empty() && tok[0] != '#' && tok.find('"') == std::string::npos)
+                            f << " " << tok;
+                    }
+                }
+            }
             f << " ];\n}\n";
         }
         shell_nix_path = proj_shell;

@@ -509,8 +509,23 @@ void Downloader::collect_pc_flags(const fs::path &pc_dir,
         std::vector<std::string> requires_list;
         parse_one_pc(pc_file, vars, lines, requires_list);
 
-        // Queue Requires deps from nix store
+        // Queue Requires deps from nix store.
+        // Skip packages that are either baked into the .a at build time,
+        // or are compiler tools not needed at user link time.
+        static const std::set<std::string> skip_transitive = {
+            "protobuf",       // baked into libseastar.a; nix index picks wrong version
+            "protobuf-lite",
+            "gnutls",         // use system — nix version needs newer glibc ABI
+            "nettle",
+            "hogweed",
+            "p11-kit-1",
+            "libtasn1",
+            "libidn2",
+            "libunistring",
+            "libunbound",
+        };
         for (const auto &req : requires_list) {
+            if (skip_transitive.count(req)) continue;
             auto nix_pc = find_nix_pc(req, searched_pkgs, nix_pc_index);
             if (!nix_pc.empty()) pc_queue.push_back(nix_pc);
         }
@@ -532,6 +547,16 @@ void Downloader::collect_pc_flags(const fs::path &pc_dir,
                 // -L/nix/store/... tells us where to find .so files for this pkg
                 bool is_nixlibdir = tok.rfind("-L/nix/store/", 0) == 0;
 
+                // Skip -L flags for packages we want to link from the system
+                if (is_nixlibdir) {
+                    static const std::vector<std::string> system_pkg_patterns = {
+                        "gnutls", "nettle", "p11-kit", "tasn1", "idn2", "unbound", "unistring"
+                    };
+                    for (const auto &pat : system_pkg_patterns) {
+                        if (tok.find(pat) != std::string::npos) { is_nixlibdir = false; break; }
+                    }
+                }
+
                 if (!is_inc && !is_def && !is_nixlib && !is_nixlibdir) continue;
 
                 if (seen_flags.insert(tok).second)
@@ -543,7 +568,25 @@ void Downloader::collect_pc_flags(const fs::path &pc_dir,
                         out_nix_incs.push_back(inc);
                 }
                 if (is_nixlibdir) {
-                    // Emit all unversioned .so files from this lib dir as bare paths
+                    // system_link_libs: skip nix symlink but still emit -l so
+                    // the system linker finds the compatible version.
+                    static const std::set<std::string> skip_libs = {
+                        "libprotoc.so",       // protobuf compiler tool
+                        "libgtest.so",        // test framework
+                        "libgmock.so",
+                    };
+                    static const std::set<std::string> system_link_libs = {
+                        "libgnutls.so",       // nix version needs newer glibc ABI — use system
+                        "libgnutls-dane.so",
+                        "libgnutlsxx.so",
+                        "libhogweed.so",
+                        "libnettle.so",
+                        "libp11-kit.so",
+                        "libtasn1.so",
+                        "libidn2.so",
+                        "libunbound.so",
+                        "libunistring.so",
+                    };
                     fs::path lib_dir(tok.substr(2));
                     if (fs::exists(lib_dir)) {
                         try {
@@ -551,6 +594,15 @@ void Downloader::collect_pc_flags(const fs::path &pc_dir,
                                 if (e.path().extension() != ".so") continue;
                                 auto fname = e.path().filename().string();
                                 if (!fname.starts_with("lib")) continue;
+                                if (skip_libs.count(fname)) continue;
+                                if (system_link_libs.count(fname)) {
+                                    // Emit -l flag only (no nix symlink) — system provides it
+                                    auto base = fname.substr(3, fname.size() - 6);
+                                    auto lflag = "-l" + base;
+                                    if (seen_flags.insert(lflag).second)
+                                        out_flags.push_back(lflag);
+                                    continue;
+                                }
                                 auto sp = e.path().string();
                                 if (seen_flags.insert(sp).second)
                                     out_flags.push_back(sp);

@@ -99,32 +99,38 @@ void Installer::auto_remove_stale_includes(const ProjectConfig &config) {
         all_wanted.insert(lib.nix_attr);
     }
 
+    // If there are system_dependencies, transitive nix-store headers may be
+    // present as flat .h files or symlinks — keep them all to avoid breaking
+    // the build. Only remove entries that clearly belong to removed git deps.
+    bool has_sys_deps = !config.system_dependencies.empty();
+
     for (const auto &entry : fs::directory_iterator(include_dir)) {
         std::string inc_name = entry.path().filename().string();
 
         bool belongs = all_wanted.count(inc_name) > 0;
 
-        // Symlink targets pointing to a known package or /nix/store/ are fine
         if (!belongs && fs::is_symlink(entry.path())) {
             auto target = fs::read_symlink(entry.path()).string();
+            // Keep anything pointing into the nix store (transitive deps)
             if (target.find("/nix/store/") != std::string::npos) {
                 belongs = true;
             } else {
                 for (const auto &dep : config.git_dependencies) {
-                    if (target.find(dep.name) != std::string::npos) {
-                        belongs = true;
-                        break;
-                    }
+                    if (target.find(dep.name) != std::string::npos) { belongs = true; break; }
                 }
                 if (!belongs) {
                     for (const auto &dep : config.system_dependencies) {
-                        if (target.find(dep.name) != std::string::npos) {
-                            belongs = true;
-                            break;
-                        }
+                        if (target.find(dep.name) != std::string::npos) { belongs = true; break; }
                     }
                 }
             }
+        }
+
+        // Keep regular .h/.hpp files when system deps are present —
+        // they were copied from nix-store transitive deps and are needed.
+        if (!belongs && has_sys_deps) {
+            auto ext = entry.path().extension().string();
+            if (ext == ".h" || ext == ".hpp" || ext == ".hh") belongs = true;
         }
 
         if (!belongs) {
