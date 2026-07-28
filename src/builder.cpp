@@ -324,13 +324,13 @@ void Builder::bundle_production(const ProjectConfig &config) const {
                           " ldd " + (dist_dir / out.filename()).string() +
                           " 2>/dev/null | grep '=>' | awk '{print $3}'"
                           " | grep -E '/nix/store/|" + cpm_lib + "'"
-                          " | grep -v -E 'libc\\.so|libc-|libm\\.so|libm-|libpthread|libdl\\.so|librt\\.so"
-                          "|libGL\\.so|libGLX\\.so|libGLdispatch|libBrokenLocale|libnss|libresolv|libmvec'"
+                          " | grep -v -E 'libc\\.so|libc-|libc\\.so\\.|libm\\.so|libm-|libm\\.so\\."
+                          "|libpthread|libdl\\.so|librt\\.so|libgcc_s"
+                          "|libGL\\.so|libGLX\\.so|libGLdispatch|libBrokenLocale|libnss|libresolv|libmvec"
+                          "|ld-linux|ld-musl|libglibc|glibc'"
                           " | while read lib; do"
                           "   real=$(readlink -f \"$lib\" 2>/dev/null || echo \"$lib\");"
                           "   [ -f \"$real\" ] && cp \"$real\" " + dist_dir.string() + "/ 2>/dev/null;"
-                          // Also copy the soname symlink (e.g. libfoo.so.1 → libfoo.so.1.2.3)
-                          // so the dynamic linker can find it by its soname.
                           "   soname=$(objdump -p \"$real\" 2>/dev/null | awk '/SONAME/{print $2}');"
                           "   if [ -n \"$soname\" ] && [ ! -e \"" + dist_dir.string() + "/$soname\" ]; then"
                           "     ln -s \"$(basename \"$real\")\" \"" + dist_dir.string() + "/$soname\" 2>/dev/null;"
@@ -416,11 +416,13 @@ int Builder::build(bool static_build) {
         if (nix.available()) {
             // Generate a minimal mkShell (not mkDerivation) so the compiler
             // is on PATH when the compile command runs inside nix-shell.
-            auto prod_shell = local_cpm_dir_ / "prod_shell.nix";
-            {
+            // Reuse project_shell.nix (which already has all transitive deps)
+            // or regenerate it if missing.
+            auto prod_shell = local_cpm_dir_ / "project_shell.nix";
+            if (!fs::exists(prod_shell)) {
+                // Generate same as project_shell.nix
                 std::string nix_compiler = "gcc13";
                 if (!config.compiler.empty()) {
-                    // compiler field like "gcc-13" → "gcc13", "clang-17" → "clang_17"
                     auto &c = config.compiler;
                     if (c.find("clang") != std::string::npos) {
                         auto d = c.find('-');
@@ -435,7 +437,7 @@ int Builder::build(bool static_build) {
                   << "pkgs.mkShell {\n"
                   << "  buildInputs = with pkgs; [ " << nix_compiler << " pkg-config zlib";
                 for (const auto &nixlib : config.nix_libraries) f << " " << nixlib.nix_attr;
-                f << " ];\n}\n";
+                f << " ];\n  NIX_CFLAGS_LINK = \"\";\n}\n";
             }
             ret = std::system(("nix-shell " + prod_shell.string() + " --run '" + compile_cmd + "' 2>&1 >/dev/null").c_str());
 
