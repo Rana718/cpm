@@ -1,0 +1,83 @@
+name: Release
+
+on:
+   push:
+      tags:
+         - "v*.*.*"
+
+permissions:
+   contents: write
+
+jobs:
+   build:
+      name: Build static binary
+      runs-on: ubuntu-22.04
+
+      steps:
+         - uses: actions/checkout@v4
+
+         - name: Install musl toolchain
+           run: |
+              sudo apt-get update
+              sudo apt-get install -y musl-tools cmake git
+
+         - name: Configure (static + musl)
+           run: |
+              cmake -S . -B build \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DBUILD_TESTING=OFF \
+                -DCMAKE_CXX_COMPILER=g++ \
+                -DCMAKE_EXE_LINKER_FLAGS="-static -static-libgcc -static-libstdc++" \
+                -DCMAKE_CXX_FLAGS="-static"
+
+         - name: Build
+           run: cmake --build build --parallel
+
+         - name: Verify static
+           run: |
+              ldd build/cpm 2>&1 | grep -q "not a dynamic" || \
+              file build/cpm | grep -q "statically linked"
+              echo "Binary info:"
+              file build/cpm
+
+         - name: Package
+           run: |
+              mkdir -p release
+              cp build/cpm release/cpm
+              tar -czf release/cpm-linux.tar.gz -C release cpm
+              sha256sum release/cpm-linux.tar.gz > release/cpm-linux.tar.gz.sha256
+
+         - uses: actions/upload-artifact@v4
+           with:
+              name: cpm-linux
+              path: release/
+
+   release:
+      name: Publish Release
+      needs: build
+      runs-on: ubuntu-22.04
+
+      steps:
+         - uses: actions/checkout@v4
+           with:
+              fetch-depth: 0
+
+         - uses: actions/download-artifact@v4
+           with:
+              merge-multiple: true
+              path: release/
+
+         - name: Get tag name
+           id: tag
+           run: echo "TAG_NAME=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+         - name: Create Release
+           uses: softprops/action-gh-release@v1
+           with:
+              tag_name: ${{ steps.tag.outputs.TAG_NAME }}
+              name: CPM ${{ steps.tag.outputs.TAG_NAME }}
+              draft: false
+              prerelease: false
+              generate_release_notes: true
+              files: release/*
+              body_path: pkg/release_note.md
