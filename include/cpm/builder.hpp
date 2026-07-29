@@ -9,7 +9,6 @@
 namespace cpm {
 
 // Compiles and runs C/C++ projects.
-// Owns all logic for building compile commands, detecting sources, linking.
 class Builder {
   public:
     Builder(std::filesystem::path project_root, std::filesystem::path local_cpm_dir, std::filesystem::path global_cache_dir);

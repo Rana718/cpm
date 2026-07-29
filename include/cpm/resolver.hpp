@@ -6,7 +6,6 @@
 namespace cpm {
 
 // Resolver exports package headers into .cpm/include/
-// resolves all includes without errors.
 class Resolver {
   public:
     Resolver(const std::filesystem::path &project_root);

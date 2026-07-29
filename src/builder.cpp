@@ -8,6 +8,7 @@
 #include "cpm/toml_parser.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <filesystem>
@@ -29,30 +30,6 @@ namespace {
 const std::set<std::string> &skip_directories() {
     static const std::set<std::string> directories = {".cpm", ".git", "build", "_build", "_cpm_build", "dist", "node_modules", "test", "tests", "example", "examples", "benchmark", "benchmarks"};
     return directories;
-}
-
-std::string build_runtime_library_path(const fs::path &local_cpm_dir) {
-    std::set<std::string> directories;
-    directories.insert((local_cpm_dir / "lib").string());
-    const auto flags_file = local_cpm_dir / "flags.txt";
-    if (fs::is_regular_file(flags_file)) {
-        std::ifstream input(flags_file);
-        std::string flag;
-        while (std::getline(input, flag)) {
-            if (flag.starts_with("-L") && flag.size() > 2) {
-                const auto dir = flag.substr(2);
-                if (fs::is_directory(dir)) directories.insert(dir);
-            }
-        }
-    }
-    std::ostringstream result;
-    bool first = true;
-    for (const auto &dir : directories) {
-        if (!first) result << ':';
-        result << dir;
-        first = false;
-    }
-    return result.str();
 }
 
 bool source_extension(const fs::path &path) {
@@ -80,7 +57,7 @@ std::string normalize_library(std::string name) {
         name.erase(suffix);
     else if (name.ends_with(".a"))
         name.erase(name.size() - 2);
-    name.erase(std::remove_if(name.begin(), name.end(), [](unsigned char c) { return !std::isalnum(c); }), name.end());
+    name.erase(std::ranges::remove_if(name, [](unsigned char c) { return !std::isalnum(c); }).begin(), name.end());
     std::ranges::transform(name, name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return name;
 }
@@ -92,6 +69,82 @@ std::string library_name(const fs::path &path) {
     if (so != std::string::npos) return file.substr(3, so - 3);
     if (file.ends_with(".a")) return file.substr(3, file.size() - 5);
     return {};
+}
+
+// Append flags from flags.txt (or defines.txt) to an argument vector.
+// Accepts dash-prefixed flags and absolute library paths; skips everything else.
+void append_package_flags(std::vector<std::string> &args, const fs::path &local_cpm_dir) {
+    const auto flags_file = local_cpm_dir / "flags.txt";
+    const auto legacy_file = local_cpm_dir / "defines.txt";
+    const auto metadata = fs::is_regular_file(flags_file) ? flags_file : legacy_file;
+    if (!fs::is_regular_file(metadata)) return;
+    std::ifstream input(metadata);
+    std::string flag;
+    while (std::getline(input, flag)) {
+        if (flag.empty()) continue;
+        const bool is_flag = flag.front() == '-';
+        const bool is_abs_lib = flag.front() == '/' && fs::exists(flag);
+        if (is_flag || is_abs_lib) args.emplace_back(std::move(flag));
+    }
+}
+
+// Append -L, archive, and -l flags for everything under library_dir.
+void append_library_flags(std::vector<std::string> &args, const fs::path &library_dir, const std::vector<NixLibrary> &nix_libraries, const std::vector<std::string> &link_libraries, std::set<std::string> &linked) {
+    if (!fs::is_directory(library_dir)) {
+        for (const auto &lib : link_libraries) {
+            const auto flag = lib.starts_with("-") || lib.find('/') != std::string::npos ? lib : "-l" + lib;
+            if (linked.insert(flag).second) args.emplace_back(flag);
+        }
+        return;
+    }
+
+    args.emplace_back("-L" + library_dir.string());
+
+    std::vector<fs::path> archives;
+    for (const auto &entry : fs::directory_iterator(library_dir)) {
+        if ((entry.is_regular_file() || entry.is_symlink()) && entry.path().extension() == ".a") archives.emplace_back(entry.path());
+    }
+    std::ranges::sort(archives);
+    if (!archives.empty()) args.emplace_back("-Wl,--start-group");
+    for (const auto &archive : archives) args.emplace_back(archive.string());
+    if (!archives.empty()) args.emplace_back("-Wl,--end-group");
+
+    for (const auto &library : nix_libraries) {
+        const std::array candidates = {normalize_library(library.name), normalize_library(library.nix_attr)};
+        for (const auto &entry : fs::directory_iterator(library_dir)) {
+            const auto link_name = library_name(entry.path());
+            if (link_name.empty()) continue;
+            const auto normalized = normalize_library(link_name);
+            const auto flag = "-l" + link_name;
+            if (std::ranges::any_of(candidates, [&](const auto &c) { return !c.empty() && (normalized == c || normalized.contains(c) || c.contains(normalized)); }) && linked.insert(flag).second)
+                args.emplace_back(flag);
+        }
+    }
+    for (const auto &lib : link_libraries) {
+        const auto flag = lib.starts_with("-") || lib.find('/') != std::string::npos ? lib : "-l" + lib;
+        if (linked.insert(flag).second) args.emplace_back(flag);
+    }
+}
+
+std::string build_runtime_library_path(const fs::path &local_cpm_dir) {
+    std::set<std::string> directories;
+    directories.insert((local_cpm_dir / "lib").string());
+    const auto flags_file = local_cpm_dir / "flags.txt";
+    if (fs::is_regular_file(flags_file)) {
+        std::ifstream input(flags_file);
+        std::string flag;
+        while (std::getline(input, flag)) {
+            if (flag.starts_with("-L") && flag.size() > 2) {
+                if (auto dir = flag.substr(2); fs::is_directory(dir)) directories.insert(std::move(dir));
+            }
+        }
+    }
+    std::string result;
+    for (const auto &dir : directories) {
+        if (!result.empty()) result += ':';
+        result += dir;
+    }
+    return result;
 }
 
 std::string shell_quote(const std::string &value) {
@@ -228,7 +281,7 @@ std::vector<fs::path> Builder::collect_source_files(const ProjectConfig &config,
         std::error_code error;
         const auto relative = fs::relative(path, project_root_, error).generic_string();
         if (error) return false;
-        return std::any_of(config.exclude_sources.begin(), config.exclude_sources.end(), [&](const auto &prefix) {
+        return std::ranges::any_of(config.exclude_sources, [&](const auto &prefix) {
             auto normalized = fs::path(prefix).lexically_normal().generic_string();
             while (normalized.starts_with("./")) normalized.erase(0, 2);
             return relative == normalized || relative.starts_with(normalized + "/");
@@ -261,7 +314,7 @@ std::vector<std::string> Builder::build_compile_arguments(const ProjectConfig &c
         arguments.emplace_back("-O3");
         arguments.emplace_back("-DNDEBUG");
     }
-    for (const auto &define : config.defines) arguments.push_back("-D" + define);
+    for (const auto &define : config.defines) arguments.emplace_back("-D" + define);
     arguments.insert(arguments.end(), config.compile_options.begin(), config.compile_options.end());
     for (const auto &directory : collect_include_dirs(config)) {
         arguments.emplace_back("-I" + directory);
@@ -286,70 +339,16 @@ std::vector<std::string> Builder::build_compile_arguments(const ProjectConfig &c
             arguments.push_back(entry_absolute);
         }
     } else {
-        arguments.push_back(entry_absolute);
+        arguments.emplace_back(entry_absolute);
     }
-    for (const auto &source : other_sources) arguments.push_back(source.string());
+    for (const auto &source : other_sources) arguments.emplace_back(source.string());
 
-    // Build metadata from installed packages. Each line is already one compiler
-    // or linker argument, so it remains a single argv element.
-    const auto flags_file = local_cpm_dir_ / "flags.txt";
-    const auto legacy_flags = local_cpm_dir_ / "defines.txt";
-    const auto metadata = fs::exists(flags_file) ? flags_file : legacy_flags;
-    if (fs::is_regular_file(metadata)) {
-        std::ifstream input(metadata);
-        std::string flag;
-        while (std::getline(input, flag)) {
-            if (flag.empty()) continue;
-            // Accept flags starting with '-' and bare absolute paths to library
-            // files (e.g. /nix/store/.../libfmt.so produced by pkg-config).
-            const bool is_flag = flag.front() == '-';
-            const bool is_abs_lib = flag.front() == '/' && fs::exists(flag);
-            if (is_flag || is_abs_lib) arguments.push_back(flag);
-        }
-    }
-
+    append_package_flags(arguments, local_cpm_dir_);
     arguments.emplace_back("-o");
-    arguments.push_back(get_output_path(config).string());
+    arguments.emplace_back(get_output_path(config).string());
 
-    const auto library_directory = local_cpm_dir_ / "lib";
     std::set<std::string> linked;
-    if (fs::is_directory(library_directory)) {
-        arguments.push_back("-L" + library_directory.string());
-        std::vector<fs::path> archives;
-        for (const auto &entry : fs::directory_iterator(library_directory)) {
-            if ((entry.is_regular_file() || entry.is_symlink()) && entry.path().extension() == ".a") {
-                archives.push_back(entry.path());
-            }
-        }
-        std::ranges::sort(archives);
-        if (!archives.empty()) arguments.emplace_back("-Wl,--start-group");
-        for (const auto &archive : archives) arguments.push_back(archive.string());
-        if (!archives.empty()) arguments.emplace_back("-Wl,--end-group");
-
-        // Resolve a Nix package alias against its actual library filenames. For
-        // packages with several public libraries, [build].link_libraries is the
-        // deterministic override.
-        for (const auto &library : config.nix_libraries) {
-            const std::vector<std::string> candidates = {normalize_library(library.name), normalize_library(library.nix_attr)};
-            for (const auto &entry : fs::directory_iterator(library_directory)) {
-                const auto link_name = library_name(entry.path());
-                if (link_name.empty()) continue;
-                const auto normalized = normalize_library(link_name);
-                const auto flag = "-l" + link_name;
-                if (std::ranges::any_of(candidates,
-                        [&](const auto &candidate) {
-                            return !candidate.empty() && (normalized == candidate || normalized.find(candidate) != std::string::npos || candidate.find(normalized) != std::string::npos);
-                        }) &&
-                    linked.insert(flag).second) {
-                    arguments.push_back(flag);
-                }
-            }
-        }
-    }
-    for (const auto &library : config.link_libraries) {
-        const auto flag = library.starts_with("-") || library.find('/') != std::string::npos ? library : "-l" + library;
-        if (linked.insert(flag).second) arguments.push_back(flag);
-    }
+    append_library_flags(arguments, local_cpm_dir_ / "lib", config.nix_libraries, config.link_libraries, linked);
     return arguments;
 }
 
@@ -397,12 +396,12 @@ int Builder::compile_incrementally(const ProjectConfig &config, const std::vecto
         if (arguments[i] == "-o" && i + 1 < arguments.size()) {
             binary = arguments[++i];
         } else if (source_argument(arguments[i])) {
-            sources.push_back(arguments[i]);
+            sources.emplace_back(arguments[i]);
         } else if (linker_argument(arguments[i])) {
-            link_flags.push_back(arguments[i]);
+            link_flags.emplace_back(arguments[i]);
         } else {
-            compile_flags.push_back(arguments[i]);
-            if (arguments[i] == "-pthread") link_flags.push_back(arguments[i]);
+            compile_flags.emplace_back(arguments[i]);
+            if (arguments[i] == "-pthread") link_flags.emplace_back(arguments[i]);
         }
     }
     link_flags.insert(link_flags.end(), config.link_options.begin(), config.link_options.end());
@@ -446,12 +445,12 @@ int Builder::compile_incrementally(const ProjectConfig &config, const std::vecto
         tasks.emplace_back([&, i] {
             std::vector<std::string> compile = {arguments.front()};
             compile.insert(compile.end(), compile_flags.begin(), compile_flags.end());
-            compile.push_back("-MMD");
-            compile.push_back("-MP");
-            compile.push_back("-c");
-            compile.push_back(sources[i]);
-            compile.push_back("-o");
-            compile.push_back(objects[i].string());
+            compile.emplace_back("-MMD");
+            compile.emplace_back("-MP");
+            compile.emplace_back("-c");
+            compile.emplace_back(sources[i]);
+            compile.emplace_back("-o");
+            compile.emplace_back(objects[i].string());
             results[i] = execute(compile, shell_nix, project_root_, true, &diagnostics[i]);
             compiled_any = true;
         });
@@ -479,9 +478,9 @@ int Builder::compile_incrementally(const ProjectConfig &config, const std::vecto
     if (!link_needed) return 0;
 
     std::vector<std::string> link = {arguments.front()};
-    for (const auto &object : objects) link.push_back(object.string());
+    for (const auto &object : objects) link.emplace_back(object.string());
     link.emplace_back("-o");
-    link.push_back(binary);
+    link.emplace_back(binary);
     link.insert(link.end(), link_flags.begin(), link_flags.end());
     return execute(link, shell_nix, project_root_, true, &output);
 }
@@ -510,9 +509,7 @@ void Builder::bundle_production(const ProjectConfig &config) const {
             // Bundle nix-store, .cpm/lib, and system runtime libraries (/usr/lib).
             // Exclude only the core C runtime that must come from the target system.
             const auto fname = fs::path(dependency).filename().string();
-            if (fname.starts_with("libc.so") || fname.starts_with("libm.so") ||
-                fname.starts_with("libdl.so") || fname.starts_with("ld-linux"))
-                continue;
+            if (fname.starts_with("libc.so") || fname.starts_with("libm.so") || fname.starts_with("libdl.so") || fname.starts_with("ld-linux")) continue;
             const bool from_nix = dependency.starts_with("/nix/store/");
             const bool from_cpm = dependency.starts_with((local_cpm_dir_ / "lib").string());
             const bool from_sys = dependency.starts_with("/usr/lib") || dependency.starts_with("/lib");
@@ -523,13 +520,10 @@ void Builder::bundle_production(const ProjectConfig &config) const {
         }
         // Copy the real library file and then recreate every symlink in its
         // source directory that points to the same real file.  This ensures
-        // both the versioned filename (libfoo.so.6.8) and the soname symlink
-        // (libfoo.so.6) land in dist/ so the dynamic linker can find them.
         for (const auto &real : real_libs) {
             std::error_code error;
             fs::copy_file(real, distribution / real.filename(), fs::copy_options::overwrite_existing, error);
             // Walk siblings in the same directory and reproduce any symlinks
-            // that ultimately resolve to this real file.
             for (const auto &sibling : fs::directory_iterator(real.parent_path(), error)) {
                 if (!sibling.is_symlink()) continue;
                 const auto sibling_real = fs::canonical(sibling.path(), error);
@@ -616,57 +610,17 @@ int Builder::run_file(const std::string &file) {
     std::vector<std::string> arguments = {
         c ? (config.compiler.starts_with("clang") ? "clang" : "gcc") : detect_compiler(config), c ? "-std=c17" : "-std=c++" + (config.cpp_standard.empty() ? "20" : config.cpp_standard)};
     if (fs::exists(manifest)) {
-        for (const auto &define : config.defines) arguments.push_back("-D" + define);
+        for (const auto &define : config.defines) arguments.emplace_back("-D" + define);
         arguments.insert(arguments.end(), config.compile_options.begin(), config.compile_options.end());
-        for (const auto &directory : collect_include_dirs(config)) arguments.push_back("-I" + directory);
-        const auto flags = fs::exists(local_cpm_dir_ / "flags.txt") ? local_cpm_dir_ / "flags.txt" : local_cpm_dir_ / "defines.txt";
-        if (fs::is_regular_file(flags)) {
-            std::ifstream input(flags);
-            std::string flag;
-            while (std::getline(input, flag)) {
-                if (flag.empty()) continue;
-                const bool is_flag = flag.front() == '-';
-                const bool is_abs_lib = flag.front() == '/' && fs::exists(flag);
-                if (is_flag || is_abs_lib) arguments.push_back(flag);
-            }
-        }
+        for (const auto &directory : collect_include_dirs(config)) arguments.emplace_back("-I" + directory);
+        append_package_flags(arguments, local_cpm_dir_);
     }
-    arguments.push_back(source.string());
+    arguments.emplace_back(source.string());
     arguments.emplace_back("-o");
-    arguments.push_back(output.string());
-    const auto libraries = local_cpm_dir_ / "lib";
+    arguments.emplace_back(output.string());
+
     std::set<std::string> linked;
-    if (fs::is_directory(libraries)) {
-        arguments.push_back("-L" + libraries.string());
-        std::vector<fs::path> archives;
-        for (const auto &entry : fs::directory_iterator(libraries)) {
-            if ((entry.is_regular_file() || entry.is_symlink()) && entry.path().extension() == ".a") archives.push_back(entry.path());
-        }
-        std::ranges::sort(archives);
-        if (!archives.empty()) arguments.emplace_back("-Wl,--start-group");
-        for (const auto &archive : archives) arguments.push_back(archive.string());
-        if (!archives.empty()) arguments.emplace_back("-Wl,--end-group");
-        for (const auto &library : config.nix_libraries) {
-            const std::vector<std::string> candidates = {normalize_library(library.name), normalize_library(library.nix_attr)};
-            for (const auto &entry : fs::directory_iterator(libraries)) {
-                const auto name = library_name(entry.path());
-                const auto normalized = normalize_library(name);
-                const auto flag = "-l" + name;
-                if (!name.empty() &&
-                    std::ranges::any_of(candidates,
-                        [&](const auto &candidate) {
-                            return !candidate.empty() && (normalized == candidate || normalized.find(candidate) != std::string::npos || candidate.find(normalized) != std::string::npos);
-                        }) &&
-                    linked.insert(flag).second) {
-                    arguments.push_back(flag);
-                }
-            }
-        }
-    }
-    for (const auto &library : config.link_libraries) {
-        const auto flag = library.starts_with("-") || library.find('/') != std::string::npos ? library : "-l" + library;
-        if (linked.insert(flag).second) arguments.push_back(flag);
-    }
+    append_library_flags(arguments, local_cpm_dir_ / "lib", config.nix_libraries, config.link_libraries, linked);
     arguments.insert(arguments.end(), config.link_options.begin(), config.link_options.end());
 
     const auto shell = fs::exists(manifest) ? create_project_shell(config) : fs::path{};

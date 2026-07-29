@@ -20,10 +20,9 @@ struct SystemDependency {
 };
 
 // A system library resolved via nix (e.g. glew, libGL, SDL3)
-// User just writes the nix package name; cpm links headers+libs into .cpm/
 struct NixLibrary {
-    std::string name;     // user-facing name (e.g. "glew")
-    std::string nix_attr; // nixpkgs attribute (e.g. "glew", "libGL")
+    std::string name;
+    std::string nix_attr;
 };
 
 struct ProjectConfig {

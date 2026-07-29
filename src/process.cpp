@@ -9,6 +9,7 @@
 #include <spawn.h>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -26,14 +27,14 @@ int decoded_status(int status) {
 std::vector<std::string> merged_environment(const std::map<std::string, std::string> &overrides) {
     std::map<std::string, std::string> variables;
     for (char **item = environ; item && *item; ++item) {
-        std::string entry(*item);
+        std::string_view entry(*item);
         const auto equals = entry.find('=');
-        if (equals != std::string::npos) variables[entry.substr(0, equals)] = entry.substr(equals + 1);
+        if (equals != std::string_view::npos) variables.emplace(entry.substr(0, equals), entry.substr(equals + 1));
     }
-    for (const auto &[name, value] : overrides) variables[name] = value;
+    for (const auto &[name, value] : overrides) variables.insert_or_assign(name, value);
     std::vector<std::string> result;
     result.reserve(variables.size());
-    for (const auto &[name, value] : variables) result.push_back(name + "=" + value);
+    for (const auto &[name, value] : variables) result.emplace_back(name + "=" + value);
     return result;
 }
 
@@ -46,6 +47,7 @@ ProcessResult Process::run(const std::vector<std::string> &arguments, const std:
     argv.reserve(arguments.size() + 1);
     for (const auto &argument : arguments) argv.push_back(const_cast<char *>(argument.c_str()));
     argv.push_back(nullptr);
+
     auto environment_storage = merged_environment(environment);
     std::vector<char *> envp;
     envp.reserve(environment_storage.size() + 1);
@@ -53,9 +55,8 @@ ProcessResult Process::run(const std::vector<std::string> &arguments, const std:
     envp.push_back(nullptr);
 
     std::array<int, 2> output_pipe{-1, -1};
-    if (capture_output && pipe(output_pipe.data()) != 0) {
-        throw std::runtime_error("cannot create process pipe: " + std::string(std::strerror(errno)));
-    }
+    if (capture_output && pipe(output_pipe.data()) != 0) throw std::runtime_error("cannot create process pipe: " + std::string(std::strerror(errno)));
+
     posix_spawn_file_actions_t actions;
     int error = posix_spawn_file_actions_init(&actions);
     if (error != 0) {
@@ -65,19 +66,22 @@ ProcessResult Process::run(const std::vector<std::string> &arguments, const std:
         }
         throw std::runtime_error("cannot initialize process: " + std::string(std::strerror(error)));
     }
-    if (!working_directory.empty()) {
-        error = posix_spawn_file_actions_addchdir_np(&actions, working_directory.c_str());
-    }
+
+    auto cleanup_pipe = [&] {
+        if (capture_output) {
+            close(output_pipe[0]);
+            close(output_pipe[1]);
+        }
+    };
+
+    if (!working_directory.empty()) error = posix_spawn_file_actions_addchdir_np(&actions, working_directory.c_str());
     if (error == 0 && capture_output) error = posix_spawn_file_actions_adddup2(&actions, output_pipe[1], STDOUT_FILENO);
     if (error == 0 && capture_output) error = posix_spawn_file_actions_adddup2(&actions, output_pipe[1], STDERR_FILENO);
     if (error == 0 && capture_output) error = posix_spawn_file_actions_addclose(&actions, output_pipe[0]);
     if (error == 0 && capture_output) error = posix_spawn_file_actions_addclose(&actions, output_pipe[1]);
     if (error != 0) {
         posix_spawn_file_actions_destroy(&actions);
-        if (capture_output) {
-            close(output_pipe[0]);
-            close(output_pipe[1]);
-        }
+        cleanup_pipe();
         throw std::runtime_error("cannot configure process: " + std::string(std::strerror(error)));
     }
 
@@ -85,10 +89,7 @@ ProcessResult Process::run(const std::vector<std::string> &arguments, const std:
     error = posix_spawnp(&pid, argv.front(), &actions, nullptr, argv.data(), envp.data());
     posix_spawn_file_actions_destroy(&actions);
     if (error != 0) {
-        if (capture_output) {
-            close(output_pipe[0]);
-            close(output_pipe[1]);
-        }
+        cleanup_pipe();
         return {error == ENOENT ? 127 : 126, std::strerror(error)};
     }
 
@@ -107,6 +108,7 @@ ProcessResult Process::run(const std::vector<std::string> &arguments, const std:
         }
         close(output_pipe[0]);
     }
+
     int status = 0;
     while (waitpid(pid, &status, 0) < 0) {
         if (errno != EINTR) throw std::runtime_error("cannot wait for process: " + std::string(std::strerror(errno)));
@@ -119,20 +121,19 @@ ProcessResult Process::shell(const std::string &script, const std::filesystem::p
 }
 
 bool Process::command_exists(const std::string &command) {
-    if (command.empty() || command.find('/') != std::string::npos) {
-        return !command.empty() && std::filesystem::is_regular_file(command) && access(command.c_str(), X_OK) == 0;
-    }
-    const char *path = std::getenv("PATH");
-    if (!path) return false;
-    std::string paths(path);
-    size_t begin = 0;
-    while (begin <= paths.size()) {
-        const auto end = paths.find(':', begin);
-        const auto directory = paths.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
-        const auto candidate = std::filesystem::path(directory.empty() ? "." : directory) / command;
+    if (command.empty() || command.find('/') != std::string::npos) return !command.empty() && std::filesystem::is_regular_file(command) && access(command.c_str(), X_OK) == 0;
+
+    const char *path_env = std::getenv("PATH");
+    if (!path_env) return false;
+
+    std::string_view paths(path_env);
+    while (!paths.empty()) {
+        const auto colon = paths.find(':');
+        const auto dir = paths.substr(0, colon);
+        const auto candidate = std::filesystem::path(dir.empty() ? std::string_view(".") : dir) / command;
         if (std::filesystem::is_regular_file(candidate) && access(candidate.c_str(), X_OK) == 0) return true;
-        if (end == std::string::npos) break;
-        begin = end + 1;
+        if (colon == std::string_view::npos) break;
+        paths.remove_prefix(colon + 1);
     }
     return false;
 }

@@ -44,8 +44,6 @@ void Resolver::export_package(const std::string &package_name, const std::filesy
 
     auto include_root = find_include_root(package_dir);
 
-    // Every package has a collision-free namespace. Build commands also add the
-    // actual include root, which preserves upstream include conventions.
     const auto namespaced = include_dir_ / package_name;
     if (fs::is_symlink(namespaced)) fs::remove(namespaced);
     if (!fs::exists(namespaced)) {
@@ -53,7 +51,6 @@ void Resolver::export_package(const std::string &package_name, const std::filesy
     }
 
     // Compatibility aliases for conventional include/foo and single_include/foo
-    // layouts. Never replace another package's export.
     if (include_root.filename() == "include" || include_root.filename() == "single_include") {
         for (const auto &entry : fs::directory_iterator(include_root)) {
             const auto alias = include_dir_ / entry.path().filename();

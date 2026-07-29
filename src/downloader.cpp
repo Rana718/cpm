@@ -75,13 +75,13 @@ std::vector<std::string> split_flags(const std::string &value) {
             quote = c;
         else if (std::isspace(static_cast<unsigned char>(c))) {
             if (!current.empty()) {
-                flags.push_back(std::move(current));
+                flags.emplace_back(std::move(current));
                 current.clear();
             }
         } else
             current.push_back(c);
     }
-    if (!current.empty()) flags.push_back(std::move(current));
+    if (!current.empty()) flags.emplace_back(std::move(current));
     return flags;
 }
 
@@ -152,7 +152,7 @@ std::vector<std::string> disabled_cmake_features(const fs::path &path) {
         const auto name = (*match)[1].str();
         std::string upper = name;
         std::ranges::transform(upper, upper.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-        if (std::ranges::any_of(disabled, [&](const auto suffix) { return upper.ends_with(suffix); })) arguments.push_back("-D" + name + "=OFF");
+        if (std::ranges::any_of(disabled, [&](const auto suffix) { return upper.ends_with(suffix); })) arguments.emplace_back("-D" + name + "=OFF");
     }
     std::ranges::sort(arguments);
     arguments.erase(std::unique(arguments.begin(), arguments.end()), arguments.end());
@@ -162,14 +162,13 @@ std::vector<std::string> disabled_cmake_features(const fs::path &path) {
 bool clone_repository(const std::string &url, const std::string &version, const fs::path &destination, bool submodules, std::string &diagnostic) {
     std::vector<std::string> clone = {"git", "-c", "advice.detachedHead=false", "clone", "--depth", "1", "--quiet"};
     if (version != "HEAD") {
-        clone.push_back("--branch");
-        clone.push_back(version);
+        clone.emplace_back("--branch");
+        clone.emplace_back(version);
     }
-    clone.push_back(url);
-    clone.push_back(destination.string());
+    clone.emplace_back(url);
+    clone.emplace_back(destination.string());
     auto result = Process::run(clone, {}, {}, true);
 
-    // --branch does not accept arbitrary commit hashes. Fall back to fetching the
     // exact ref into an otherwise empty checkout.
     if (result.exit_code != 0 && version != "HEAD") {
         fs::remove_all(destination);
@@ -233,9 +232,6 @@ void rewrite_pkgconfig_prefix(const fs::path &built, const std::string &old_pref
                     updated += "prefix=" + new_prefix + '\n';
                     changed = true;
                 } else {
-                    // Also replace any remaining literal occurrences of the old
-                    // temp path that appear in variable values (e.g. hardcoded paths
-                    // not expressed via ${prefix}).
                     std::string::size_type pos = 0;
                     while ((pos = line.find(old_prefix, pos)) != std::string::npos) {
                         line.replace(pos, old_prefix.size(), new_prefix);
@@ -351,10 +347,10 @@ std::string Downloader::resolve_git_ref(const std::string &url, const std::strin
     if (ref == "HEAD") {
         arguments.emplace_back("HEAD");
     } else {
-        arguments.push_back(ref);
-        arguments.push_back("refs/heads/" + ref);
-        arguments.push_back("refs/tags/" + ref);
-        arguments.push_back("refs/tags/" + ref + "^{}");
+        arguments.emplace_back(ref);
+        arguments.emplace_back("refs/heads/" + ref);
+        arguments.emplace_back("refs/tags/" + ref);
+        arguments.emplace_back("refs/tags/" + ref + "^{}");
     }
     const auto result = Process::run(arguments, {}, {}, true);
     if (result.exit_code != 0) throw std::runtime_error("failed to resolve Git ref '" + ref + "' for " + name + ":\n" + result.output);
@@ -542,7 +538,7 @@ bool Downloader::build_from_source(const std::string &name, const fs::path &sour
         std::vector<fs::path> trees;
         try {
             for (const auto &entry : fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied)) {
-                if (entry.is_regular_file() && entry.path().filename() == "CMakeCache.txt") trees.push_back(entry.path().parent_path());
+                if (entry.is_regular_file() && entry.path().filename() == "CMakeCache.txt") trees.emplace_back(entry.path().parent_path());
             }
         } catch (const fs::filesystem_error &) {
         }
@@ -563,7 +559,7 @@ bool Downloader::build_from_source(const std::string &name, const fs::path &sour
         attempt("configure.py", [&] {
             const auto help = execute({"python3", (source / "configure.py").string(), "--help"}, source);
             std::vector<std::string> arguments = {"python3", (source / "configure.py").string(), "--prefix=" + prefix.string()};
-            const auto supports = [&](std::string_view option) { return help.output.find(option) != std::string::npos; };
+            const auto supports = [&](std::string_view option) { return help.output.contains(option); };
             const auto configure_build = source / ".cpm-configure-build";
             if (supports("--mode")) arguments.emplace_back("--mode=release");
             if (supports("--build-root")) arguments.emplace_back("--build-root=" + configure_build.string());
@@ -598,8 +594,8 @@ bool Downloader::build_from_source(const std::string &name, const fs::path &sour
     if (fs::exists(source / "cooking.sh")) {
         attempt("cooking.sh", [&] {
             const auto cooking_build = source / ".cpm-cooking-build";
-            std::vector<std::string> arguments = {"bash", (source / "cooking.sh").string(), "-t", "Release", "-g", "Ninja", "-d", cooking_build.string(), "-p",
-                (prefix / ".cpm-cooking").string(), "--", "-DCMAKE_INSTALL_PREFIX=" + prefix.string(), "-DBUILD_TESTING=OFF", "-DBUILD_TESTS=OFF", "-DBUILD_EXAMPLES=OFF"};
+            std::vector<std::string> arguments = {"bash", (source / "cooking.sh").string(), "-t", "Release", "-g", "Ninja", "-d", cooking_build.string(), "-p", (prefix / ".cpm-cooking").string(),
+                "--", "-DCMAKE_INSTALL_PREFIX=" + prefix.string(), "-DBUILD_TESTING=OFF", "-DBUILD_TESTS=OFF", "-DBUILD_EXAMPLES=OFF"};
             const auto feature_options = disabled_cmake_features(source / "CMakeLists.txt");
             arguments.insert(arguments.end(), feature_options.begin(), feature_options.end());
             auto result = execute(arguments, source);
@@ -695,27 +691,21 @@ bool Downloader::build_from_source(const std::string &name, const fs::path &sour
             ProcessResult metadata;
             if (shell.empty()) {
                 // Prepend the package's pc dir to the host PKG_CONFIG_PATH so
-                // transitive dependencies already on the host path stay visible.
                 const char *host_pkgcfg = std::getenv("PKG_CONFIG_PATH");
-                const std::string combined = host_pkgcfg && *host_pkgcfg
-                    ? pc_root.string() + ":" + host_pkgcfg
-                    : pc_root.string();
+                const std::string combined = host_pkgcfg && *host_pkgcfg ? pc_root.string() + ":" + host_pkgcfg : pc_root.string();
                 const std::map<std::string, std::string> environment = {{"PKG_CONFIG_PATH", combined}};
                 metadata = Process::run({"pkg-config", "--cflags", "--libs", "--static", package}, {}, environment, true);
             } else {
                 // Inside the nix shell PKG_CONFIG_PATH already covers every nix-store
                 // package.  Prepend the package's own pc dir and keep the rest intact.
-                const std::string prepend_cmd = "PKG_CONFIG_PATH=" + shell_quote(pc_root.string()) +
-                    ":${PKG_CONFIG_PATH:-} pkg-config --cflags --libs --static " + shell_quote(package);
+                const std::string prepend_cmd = "PKG_CONFIG_PATH=" + shell_quote(pc_root.string()) + ":${PKG_CONFIG_PATH:-} pkg-config --cflags --libs --static " + shell_quote(package);
                 metadata = Process::run({"nix-shell", shell.string(), "--run", prepend_cmd}, {}, {}, true);
             }
             if (metadata.exit_code == 0)
                 for (auto &flag : split_flags(metadata.output)) {
                     // Only keep tokens that are compiler/linker arguments or absolute
                     // paths to library files. Discard stray output such as locale
-                    // warnings that nix-shell may emit alongside the real flags.
-                    if (!flag.empty() && (flag.front() == '-' || flag.front() == '/'))
-                        flags.insert(std::move(flag));
+                    if (!flag.empty() && (flag.front() == '-' || flag.front() == '/')) flags.insert(std::move(flag));
                 }
         }
     }
@@ -787,7 +777,6 @@ void Downloader::install_built_library(const std::string &name, const fs::path &
             } else if (flag.front() == '/') {
                 const fs::path p(flag);
                 // Absolute path to a shared library: symlink it and all versioned
-                // soname siblings (e.g. libfoo.so.1, libfoo.so.1.2.3) into .cpm/lib
                 // so LD_LIBRARY_PATH=.cpm/lib is sufficient at runtime. Skip paths
                 // that no longer exist (e.g. stale temp-dir references).
                 if (!fs::exists(p)) continue;
@@ -804,10 +793,8 @@ void Downloader::install_built_library(const std::string &name, const fs::path &
                         if (sname.substr(0, base.size()) != base) continue;
                         if (!library_file(sibling.path())) continue;
                         const auto target = libraries / sibling.path().filename();
-                        if (!fs::exists(target) && !fs::is_symlink(target))
-                            fs::create_symlink(fs::absolute(sibling.path()), target);
+                        if (!fs::exists(target) && !fs::is_symlink(target)) fs::create_symlink(fs::absolute(sibling.path()), target);
                     }
-                    // Store the flag so the linker also gets the direct path.
                     flags.insert(flag);
                 }
             }

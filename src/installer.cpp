@@ -74,7 +74,7 @@ std::vector<LockedDependency> read_lock(const fs::path &path) {
         } else if (!(input >> std::quoted(dependency.requested) >> std::quoted(dependency.resolved))) {
             throw std::runtime_error("invalid cpm.lock entry");
         }
-        dependencies.push_back(std::move(dependency));
+        dependencies.emplace_back(std::move(dependency));
     }
     return dependencies;
 }
@@ -238,8 +238,8 @@ void Installer::install_impl(bool refresh_lock) {
     header_ids.reserve(config.git_dependencies.size());
     sys_ids.reserve(config.system_dependencies.size());
 
-    for (const auto &dep : config.git_dependencies) header_ids.push_back(progress.add_task(dep.name));
-    for (const auto &dep : config.system_dependencies) sys_ids.push_back(progress.add_task(dep.name));
+    for (const auto &dep : config.git_dependencies) header_ids.emplace_back(progress.add_task(dep.name));
+    for (const auto &dep : config.system_dependencies) sys_ids.emplace_back(progress.add_task(dep.name));
 
     const bool has_work = !config.git_dependencies.empty() || !config.system_dependencies.empty();
     if (has_work) progress.start();
@@ -276,7 +276,7 @@ void Installer::install_impl(bool refresh_lock) {
                 } catch (const std::exception &e) {
                     ++failures;
                     std::scoped_lock error_lock(error_mutex);
-                    errors.push_back(dep.name + ": " + e.what());
+                    errors.emplace_back(dep.name + ": " + e.what());
                     progress.set_status(tid, TaskStatus::Failed);
                 }
             });
@@ -301,7 +301,7 @@ void Installer::install_impl(bool refresh_lock) {
                 } catch (const std::exception &e) {
                     ++failures;
                     std::scoped_lock error_lock(error_mutex);
-                    errors.push_back(dep.name + ": " + e.what());
+                    errors.emplace_back(dep.name + ": " + e.what());
                     progress.set_status(tid, TaskStatus::Failed);
                 }
             });
@@ -337,7 +337,7 @@ void Installer::install_impl(bool refresh_lock) {
         throw std::runtime_error("cannot publish environment: " + publish_error.message());
     }
     try {
-        Environment(project_root_).create(); // Rewrite activation paths after the directory move.
+        Environment(project_root_).create();
         fs::rename(staged_lock, project_root_ / "cpm.lock");
     } catch (...) {
         fs::remove_all(local_cpm_dir_);
@@ -346,7 +346,7 @@ void Installer::install_impl(bool refresh_lock) {
     }
     if (fs::is_directory(backup / "objects") && !fs::exists(local_cpm_dir_ / "objects")) {
         fs::rename(backup / "objects", local_cpm_dir_ / "objects", publish_error);
-        publish_error.clear(); // Object cache preservation is an optimization.
+        publish_error.clear(); 
     }
     fs::remove_all(backup);
 

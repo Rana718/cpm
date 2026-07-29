@@ -7,7 +7,6 @@
 namespace cpm {
 
 // Manages isolated build environment using .cpm directory
-// instead of system paths, similar to virtualenv or node_modules
 class Environment {
   public:
     Environment(const std::filesystem::path &project_root);
