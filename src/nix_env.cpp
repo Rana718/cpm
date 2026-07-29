@@ -55,13 +55,13 @@ std::vector<std::string> NixEnv::detect_nix_deps(const fs::path &source) const {
         const char *file;
         std::initializer_list<const char *> pkgs;
     } build_tools[] = {
-        {"CMakeLists.txt", {"cmake", "ninja"}},
-        {"meson.build", {"meson", "ninja"}},
-        {"configure.py", {"python3", "ninja", "gnumake"}},
-        {"cooking.sh", {"cmake", "ninja"}},
-        {"Makefile", {"gnumake"}},
-        {"makefile", {"gnumake"}},
-        {"package.json", {"nodejs"}},
+        {.file = "CMakeLists.txt", .pkgs = {"cmake", "ninja"}},
+        {.file = "meson.build", .pkgs = {"meson", "ninja"}},
+        {.file = "configure.py", .pkgs = {"python3", "ninja", "gnumake"}},
+        {.file = "cooking.sh", .pkgs = {"cmake", "ninja"}},
+        {.file = "Makefile", .pkgs = {"gnumake"}},
+        {.file = "makefile", .pkgs = {"gnumake"}},
+        {.file = "package.json", .pkgs = {"nodejs"}},
     };
     for (const auto &[file, pkgs] : build_tools) {
         if (fs::exists(source / file))
@@ -156,11 +156,8 @@ std::vector<std::string> NixEnv::detect_nix_deps(const fs::path &source) const {
     return {dependencies.begin(), dependencies.end()};
 }
 
-std::string NixEnv::generate_shell_nix(const std::string &compiler, const std::string & /*cpp_standard*/,
-                                        const std::vector<std::string> &extra_deps,
-                                        const fs::path &user_nix_config) const {
-    if (!compiler.empty() && !valid_attribute(compiler))
-        throw std::runtime_error("invalid Nix compiler attribute");
+std::string NixEnv::generate_shell_nix(const std::string &compiler, const std::string & /*cpp_standard*/, const std::vector<std::string> &extra_deps, const fs::path &user_nix_config) const {
+    if (!compiler.empty() && !valid_attribute(compiler)) throw std::runtime_error("invalid Nix compiler attribute");
 
     // Collect all CPM-managed packages into a deduplicated set.
     std::set<std::string> cpm_packages;
@@ -173,7 +170,7 @@ std::string NixEnv::generate_shell_nix(const std::string &compiler, const std::s
     // If the user provided their own .nix file, it takes priority.
     // CPM merges its additional packages in without duplicating what the
     if (!user_nix_config.empty() && fs::exists(user_nix_config)) {
-        const auto user_contents = read_file(user_nix_config);
+        auto user_contents = read_file(user_nix_config);
 
         // Parse the `with pkgs; [ … ]` package list from the user file so we
         // can avoid re-declaring anything already present.
@@ -183,8 +180,7 @@ std::string NixEnv::generate_shell_nix(const std::string &compiler, const std::s
         std::smatch block;
         if (std::regex_search(user_contents, block, re_pkg_block)) {
             const auto pkg_list = block[1].str();
-            for (std::sregex_iterator m(pkg_list.begin(), pkg_list.end(), re_token), end; m != end; ++m)
-                user_packages.insert((*m)[0].str());
+            for (std::sregex_iterator m(pkg_list.begin(), pkg_list.end(), re_token), end; m != end; ++m) user_packages.insert((*m)[0].str());
         }
 
         // Keep only CPM packages not already in the user config.
@@ -192,8 +188,7 @@ std::string NixEnv::generate_shell_nix(const std::string &compiler, const std::s
         for (const auto &pkg : cpm_packages)
             if (!user_packages.contains(pkg)) additional.emplace_back(pkg);
 
-        if (additional.empty())
-            return user_contents;
+        if (additional.empty()) return user_contents;
 
         // Wrap: call the user shell as a function and extend its package list
         // with the extra CPM deps. User's nixpkgs, overlays, shellHook, etc.

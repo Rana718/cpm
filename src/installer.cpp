@@ -199,7 +199,7 @@ void Installer::install_impl(bool refresh_lock) {
             if (!staging.empty()) fs::remove_all(staging, error);
             fs::remove_all(lock, error);
         }
-    } cleanup{lock, project_root_ / (".cpm-transaction-" + std::to_string(::getpid()))};
+    } cleanup{.lock = lock, .staging = project_root_ / (".cpm-transaction-" + std::to_string(::getpid()))};
     const auto backup = project_root_ / ".cpm-backup";
     if (fs::exists(backup)) {
         if (!fs::exists(local_cpm_dir_))
@@ -346,7 +346,7 @@ void Installer::install_impl(bool refresh_lock) {
     }
     if (fs::is_directory(backup / "objects") && !fs::exists(local_cpm_dir_ / "objects")) {
         fs::rename(backup / "objects", local_cpm_dir_ / "objects", publish_error);
-        publish_error.clear(); 
+        publish_error.clear();
     }
     fs::remove_all(backup);
 
@@ -364,7 +364,7 @@ void Installer::install_package(const std::string &package_spec, const std::stri
         const auto equals = spec.find('=');
         const auto attribute = equals == std::string::npos ? spec : spec.substr(equals + 1);
         const auto name = equals == std::string::npos ? spec : spec.substr(0, equals);
-        TomlParser::upsert_nix_library(toml_path, {name, attribute});
+        TomlParser::upsert_nix_library(toml_path, {.name = name, .nix_attr = attribute});
         try {
             install();
         } catch (...) {

@@ -178,6 +178,7 @@ const NAV = [
    { id: "config", label: "cpm.toml", icon: HiOutlineCog6Tooth },
    { id: "commands", label: "Commands", icon: HiOutlineCommandLine },
    { id: "dependencies", label: "Dependencies", icon: HiOutlineCube },
+   { id: "nixconfig", label: "Nix Config", icon: HiOutlineWrenchScrewdriver },
    { id: "build", label: "Build & Run", icon: HiOutlineWrenchScrewdriver },
    { id: "faq", label: "FAQ", icon: HiOutlineBookOpen },
 ];
@@ -699,6 +700,128 @@ freetype = "freetype"`}
                   <code className="bg-muted px-1 rounded font-mono text-xs">~/.cpm/cache/</code>.
                   Packages are downloaded once and symlinked to projects — subsequent installs are instant.
                </Callout>
+            </Section>
+
+            {/* Nix Config */}
+            <Section id="nixconfig">
+               <Heading>Nix Config — Bring Your Own Shell</Heading>
+               <p className="text-sm text-muted-foreground mb-3">
+                  CPM can inherit and merge your own{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">nix-shell</code>{" "}
+                  configuration. This lets you declare custom packages, overlays, compiler versions,
+                  and{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">shellHook</code>{" "}
+                  scripts — while CPM still adds whatever it auto-detects from your source tree on
+                  top, without duplication.
+               </p>
+
+               <SubHeading>1. Create a shell.nix in your project</SubHeading>
+               <CodeBlock
+                  lang="bash"
+                  code={`# shell.nix — user-managed, lives next to cpm.toml
+{ pkgs ? import <nixpkgs> {} }:
+pkgs.mkShell {
+  # Only declare packages CPM does not auto-detect.
+  # Build tools (cmake, ninja, gcc, pkg-config) and well-known
+  # library dependencies are added automatically.
+  packages = with pkgs; [
+    openssl       # TLS for HTTPS endpoints
+    postgresql    # libpq client library
+    spdlog        # fast structured logging
+  ];
+
+  shellHook = ''
+    echo "dev shell ready"
+  '';
+}`}
+               />
+
+               <SubHeading>2. Point cpm.toml at it</SubHeading>
+               <CodeBlock
+                  lang="toml"
+                  code={`[project]
+name    = "myapp"
+version = "0.1.0"
+cpp_standard = "20"
+nix_config = "./shell.nix"   # relative path to your .nix file`}
+               />
+
+               <SubHeading>How merging works</SubHeading>
+               <p className="text-sm text-muted-foreground mb-3">
+                  When{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">nix_config</code>{" "}
+                  is set, CPM reads your shell file, extracts the package list, and compares it
+                  with what it auto-detected from the source tree. Only packages not already in
+                  your file are added:
+               </p>
+               <div className="overflow-x-auto rounded-lg border border-border my-3">
+                  <table className="w-full text-sm">
+                     <thead>
+                        <tr className="bg-muted border-b border-border">
+                           <th className="text-left px-4 py-2 font-medium text-muted-foreground">Scenario</th>
+                           <th className="text-left px-4 py-2 font-medium text-muted-foreground">Result</th>
+                        </tr>
+                     </thead>
+                     <tbody className="divide-y divide-border">
+                        {[
+                           ["User declares openssl, CPM detects cmake + ninja", "Shell has openssl + cmake + ninja — no duplicates"],
+                           ["User declares cmake, CPM also detects cmake", "cmake appears once in the merged shell"],
+                           ["User shell has a shellHook", "shellHook is fully preserved in the merged shell"],
+                           ["User has a custom nixpkgs pin", "User nixpkgs takes priority — CPM respects it"],
+                           ["Empty packages list in shell.nix", "CPM fills in everything automatically"],
+                        ].map(([scenario, result]) => (
+                           <tr key={scenario} className="hover:bg-muted/30">
+                              <td className="px-4 py-2 text-foreground text-xs">{scenario}</td>
+                              <td className="px-4 py-2 text-muted-foreground text-xs">{result}</td>
+                           </tr>
+                        ))}
+                     </tbody>
+                  </table>
+               </div>
+
+               <SubHeading>Generated merged shell (example)</SubHeading>
+               <p className="text-sm text-muted-foreground mb-2">
+                  CPM writes a merged{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">.cpm/project_shell.nix</code>{" "}
+                  that calls your shell as a function and extends it:
+               </p>
+               <CodeBlock
+                  lang="bash"
+                  code={`# .cpm/project_shell.nix — generated by CPM, do not edit
+{ pkgs ? import <nixpkgs> {} }:
+let
+  userShell = import /abs/path/to/shell.nix { inherit pkgs; };
+  cpmExtra  = with pkgs; [ cmake ninja pkg-config boost c-ares ];
+in userShell.overrideAttrs (old: {
+  packages = (old.packages or []) ++ cpmExtra;
+})`}
+               />
+
+               <Callout type="tip">
+                  If your{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">shell.nix</code>{" "}
+                  already declares everything CPM would detect, the packages list in the merged
+                  shell will be empty and your file is used as-is.
+               </Callout>
+
+               <SubHeading>Using with [build].nix_deps</SubHeading>
+               <p className="text-sm text-muted-foreground mb-2">
+                  You can combine{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">nix_config</code>{" "}
+                  with{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">nix_deps</code>{" "}
+                  in{" "}
+                  <code className="bg-muted px-1 rounded font-mono text-xs">[build]</code>{" "}
+                  — both are merged without duplication:
+               </p>
+               <CodeBlock
+                  lang="toml"
+                  code={`[project]
+nix_config = "./shell.nix"
+
+[build]
+nix_deps = ["protobuf", "grpc"]   # added on top of shell.nix`}
+               />
             </Section>
 
             {/* Build & Run */}

@@ -65,7 +65,7 @@ std::string Environment::generate_activation_script() const {
     std::ostringstream s;
     s << "#!/bin/bash\n";
     s << "# Source this file: source .cpm/activate.sh\n\n";
-    s << "if [ \"${CPM_ACTIVE:-}\" = 1 ] && [ \"${CPM_ROOT:-}\" = " << shell_literal(cpm_dir_.string()) << " ]; then\n"
+    s << R"(if [ "${CPM_ACTIVE:-}" = 1 ] && [ "${CPM_ROOT:-}" = )" << shell_literal(cpm_dir_.string()) << " ]; then\n"
       << "    return 0 2>/dev/null || exit 0\n"
       << "fi\n"
       << "if command -v cpm_deactivate >/dev/null 2>&1; then cpm_deactivate; fi\n\n";

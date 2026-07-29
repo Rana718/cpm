@@ -219,12 +219,12 @@ Builder::Builder(fs::path project_root, fs::path local_cpm_dir, fs::path global_
 std::string Builder::detect_compiler(const ProjectConfig &config) const {
     if (!config.compiler.empty()) {
         if (config.compiler.starts_with("gcc-")) {
-            const auto host = "g++-" + config.compiler.substr(4);
+            auto host = "g++-" + config.compiler.substr(4);
             if (!NixEnv(local_cpm_dir_, global_cache_dir_).available() && Process::command_exists(host)) return host;
             return "g++";
         }
         if (config.compiler.starts_with("clang-")) {
-            const auto host = "clang++-" + config.compiler.substr(6);
+            auto host = "clang++-" + config.compiler.substr(6);
             if (!NixEnv(local_cpm_dir_, global_cache_dir_).available() && Process::command_exists(host)) return host;
             return "clang++";
         }

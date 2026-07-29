@@ -28,14 +28,14 @@ tasks:
    lint:
       desc: Run clang-tidy linting
       cmds:
-         - task: default
+         - task: build
          - clang-tidy {{.SRC_FILES}} -p {{.BUILD_DIR}} --fix --fix-errors
          - echo "[task] Lint complete"
 
    lint:check:
       desc: Run clang-tidy without fixing
       cmds:
-         - task: default
+         - task: build
          - clang-tidy {{.SRC_FILES}} -p {{.BUILD_DIR}}
 
    fix:

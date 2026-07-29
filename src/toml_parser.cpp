@@ -14,13 +14,13 @@ namespace cpm {
 namespace {
 
 bool valid_package_name(const std::string &name) {
-    return !name.empty() && std::all_of(name.begin(), name.end(), [](unsigned char c) { return std::isalnum(c) || c == '-' || c == '_' || c == '.'; });
+    return !name.empty() && std::ranges::all_of(name, [](unsigned char c) { return std::isalnum(c) || c == '-' || c == '_' || c == '.'; });
 }
 
 bool valid_nix_attr(const std::string &name) { return valid_package_name(name); }
 
 bool valid_nix_pin(const std::string &pin) {
-    return std::all_of(pin.begin(), pin.end(), [](unsigned char c) { return std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '/'; });
+    return std::ranges::all_of(pin, [](unsigned char c) { return std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '/'; });
 }
 
 bool safe_project_path(const std::string &value) {
@@ -159,7 +159,7 @@ void upsert_section_value(const std::filesystem::path &path, const std::string &
     }
     const auto replacement = key + " = " + encode_string(value);
     if (section == lines.size()) {
-        lines.push_back({});
+        lines.emplace_back();
         lines.push_back(heading);
         lines.push_back(replacement);
     } else {
@@ -226,7 +226,7 @@ GitDependency TomlParser::parse_git_dependency(const std::string &name, const st
     std::string spec = trim(raw_spec);
     if (spec.empty()) throw std::runtime_error("empty dependency specification for '" + name + "'");
 
-    GitDependency dep{name, {}, "*"};
+    GitDependency dep{.name = name, .github_url = {}, .version = "*"};
     const bool shorthand = spec.starts_with("github:");
     if (shorthand) spec.erase(0, 7);
 
@@ -291,13 +291,10 @@ ProjectConfig TomlParser::parse(const std::filesystem::path &toml_path) {
                 else if (key == "nixpkgs")
                     config.nixpkgs = value;
                 else if (key == "nix_config") {
-                    if (!value.ends_with(".nix"))
-                        throw std::runtime_error("nix_config must point to a .nix file");
-                    if (!safe_project_path(value))
-                        throw std::runtime_error("nix_config must be a relative path inside the project");
+                    if (!value.ends_with(".nix")) throw std::runtime_error("nix_config must point to a .nix file");
+                    if (!safe_project_path(value)) throw std::runtime_error("nix_config must be a relative path inside the project");
                     config.nix_config = value;
-                }
-                else if (key == "entry")
+                } else if (key == "entry")
                     config.entry = value;
                 else if (key == "output")
                     config.output = value;
@@ -306,12 +303,12 @@ ProjectConfig TomlParser::parse(const std::filesystem::path &toml_path) {
                 if (section == "dependencies")
                     config.git_dependencies.push_back(std::move(git));
                 else
-                    config.system_dependencies.push_back({git.name, git.github_url, git.version});
+                    config.system_dependencies.push_back({.name = git.name, .github_url = git.github_url, .version = git.version});
             } else if (section == "libs") {
                 if (!valid_package_name(key)) throw std::runtime_error("invalid library name '" + key + "'");
                 const auto attribute = value.empty() ? key : value;
                 if (!valid_nix_attr(attribute)) throw std::runtime_error("invalid Nix attribute '" + attribute + "'");
-                config.nix_libraries.push_back({key, attribute});
+                config.nix_libraries.push_back({.name = key, .nix_attr = attribute});
             } else if (section == "scripts" && key == "start") {
                 config.start_script = value;
             } else if (section == "build") {
@@ -347,7 +344,7 @@ ProjectConfig TomlParser::parse(const std::filesystem::path &toml_path) {
     if (config.output.empty()) config.output = config.name;
     if (config.entry.empty()) config.entry = "main.cpp";
     static const std::vector<std::string> standards = {"11", "14", "17", "20", "23", "26"};
-    if (std::find(standards.begin(), standards.end(), config.cpp_standard) == standards.end()) {
+    if (std::ranges::find(standards, config.cpp_standard) == standards.end()) {
         throw std::runtime_error(toml_path.string() + ": unsupported cpp_standard '" + config.cpp_standard + "'");
     }
     if (!safe_project_path(config.output)) {

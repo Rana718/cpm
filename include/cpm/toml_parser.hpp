@@ -31,7 +31,7 @@ struct ProjectConfig {
     std::string description;
     std::string cpp_standard;
     std::string compiler;
-    std::string nixpkgs; // pin nixpkgs channel (e.g. "nixos-24.05", "nixos-23.11")
+    std::string nixpkgs;    // pin nixpkgs channel (e.g. "nixos-24.05", "nixos-23.11")
     std::string nix_config; // optional: path to user-provided .nix shell file (relative to project root)
 
     std::string entry;

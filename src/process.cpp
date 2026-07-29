@@ -90,7 +90,7 @@ ProcessResult Process::run(const std::vector<std::string> &arguments, const std:
     posix_spawn_file_actions_destroy(&actions);
     if (error != 0) {
         cleanup_pipe();
-        return {error == ENOENT ? 127 : 126, std::strerror(error)};
+        return {.exit_code = error == ENOENT ? 127 : 126, .output = std::strerror(error)};
     }
 
     std::string output;
@@ -113,7 +113,7 @@ ProcessResult Process::run(const std::vector<std::string> &arguments, const std:
     while (waitpid(pid, &status, 0) < 0) {
         if (errno != EINTR) throw std::runtime_error("cannot wait for process: " + std::string(std::strerror(errno)));
     }
-    return {decoded_status(status), std::move(output)};
+    return {.exit_code = decoded_status(status), .output = std::move(output)};
 }
 
 ProcessResult Process::shell(const std::string &script, const std::filesystem::path &working_directory, const std::map<std::string, std::string> &environment, bool capture_output) {

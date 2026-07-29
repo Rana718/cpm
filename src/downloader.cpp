@@ -155,7 +155,7 @@ std::vector<std::string> disabled_cmake_features(const fs::path &path) {
         if (std::ranges::any_of(disabled, [&](const auto suffix) { return upper.ends_with(suffix); })) arguments.emplace_back("-D" + name + "=OFF");
     }
     std::ranges::sort(arguments);
-    arguments.erase(std::unique(arguments.begin(), arguments.end()), arguments.end());
+    arguments.erase(std::ranges::unique(arguments).begin(), arguments.end());
     return arguments;
 }
 
@@ -228,7 +228,7 @@ void rewrite_pkgconfig_prefix(const fs::path &built, const std::string &old_pref
             std::string line;
             bool changed = false;
             while (std::getline(lines, line)) {
-                if (line.rfind("prefix=", 0) == 0 && line.substr(7) == old_prefix) {
+                if (line.starts_with("prefix=") && line.substr(7) == old_prefix) {
                     updated += "prefix=" + new_prefix + '\n';
                     changed = true;
                 } else {
@@ -469,7 +469,7 @@ bool Downloader::build_from_source(const std::string &name, const fs::path &sour
         auto dependencies = nix.detect_nix_deps(source);
         dependencies.insert(dependencies.end(), config.extra_nix_deps.begin(), config.extra_nix_deps.end());
         std::ranges::sort(dependencies);
-        dependencies.erase(std::unique(dependencies.begin(), dependencies.end()), dependencies.end());
+        dependencies.erase(std::ranges::unique(dependencies).begin(), dependencies.end());
         std::string compiler = config.compiler;
         if (compiler.starts_with("gcc-"))
             compiler = "gcc" + compiler.substr(4);
@@ -479,8 +479,8 @@ bool Downloader::build_from_source(const std::string &name, const fs::path &sour
             compiler = "gcc";
         else if (compiler == "clang")
             compiler = "clang";
-        std::string expression = nix.generate_shell_nix(compiler, config.cpp_standard, dependencies,
-            (!config.nix_config.empty() && !project_root.empty()) ? project_root / config.nix_config : fs::path{});
+        std::string expression =
+            nix.generate_shell_nix(compiler, config.cpp_standard, dependencies, (!config.nix_config.empty() && !project_root.empty()) ? project_root / config.nix_config : fs::path{});
         if (!config.nixpkgs.empty()) {
             const auto import = expression.find("import <nixpkgs>");
             if (import != std::string::npos) {
@@ -544,8 +544,8 @@ bool Downloader::build_from_source(const std::string &name, const fs::path &sour
         } catch (const fs::filesystem_error &) {
         }
         std::ranges::sort(trees, [](const auto &left, const auto &right) { return left.native().size() < right.native().size(); });
-        if (trees.empty()) return ProcessResult{1, "configure completed but did not create a CMake build tree"};
-        ProcessResult result{1, "no configured build tree succeeded"};
+        if (trees.empty()) return ProcessResult{.exit_code = 1, .output = "configure completed but did not create a CMake build tree"};
+        ProcessResult result{.exit_code = 1, .output = "no configured build tree succeeded"};
         for (const auto &tree : trees) {
             result = execute({"cmake", "--build", tree.string(), "--parallel"}, source);
             if (result.exit_code != 0) continue;
@@ -791,7 +791,7 @@ void Downloader::install_built_library(const std::string &name, const fs::path &
                     for (const auto &sibling : fs::directory_iterator(p.parent_path(), ec)) {
                         if (!sibling.is_regular_file() && !sibling.is_symlink()) continue;
                         const auto sname = sibling.path().filename().string();
-                        if (sname.substr(0, base.size()) != base) continue;
+                        if (!sname.starts_with(base)) continue;
                         if (!library_file(sibling.path())) continue;
                         const auto target = libraries / sibling.path().filename();
                         if (!fs::exists(target) && !fs::is_symlink(target)) fs::create_symlink(fs::absolute(sibling.path()), target);

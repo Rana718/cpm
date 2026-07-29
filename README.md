@@ -67,6 +67,7 @@ version = "0.1.0"
 cpp_standard = "20"
 compiler = "gcc-13" # optional; uses Nix when available
 nixpkgs = "nixos-24.05" # recommended when using Nix
+nix_config = "./shell.nix" # optional; path to user nix-shell file
 entry = "src/main.cpp"
 output = "service"
 
@@ -137,6 +138,40 @@ cpm add --lib ssl=openssl
 ```
 
 Pin `[project].nixpkgs` for repeatable Nix resolution. Without a pin, the configured host nixpkgs channel is used.
+
+### User Nix Config
+
+Set `nix_config` in `[project]` to point at your own `nix-shell` file (relative path, must end in `.nix`). CPM merges its auto-detected build dependencies into your shell without duplication — your `shellHook`, overlays, and nixpkgs pin are fully preserved.
+
+```toml
+[project]
+nix_config = "./shell.nix"
+```
+
+```nix
+# shell.nix — declare only what CPM won't auto-detect
+{ pkgs ? import <nixpkgs> {} }:
+pkgs.mkShell {
+  packages = with pkgs; [
+    openssl       # TLS support
+    postgresql    # libpq database client
+    spdlog        # fast logging
+  ];
+  shellHook = "echo dev shell ready";
+}
+```
+
+CPM reads the `with pkgs; [ … ]` block from your file, identifies which packages it would add from its own detection, removes the ones already declared, and merges only the difference via `overrideAttrs`. If your shell already covers everything, it is used as-is with no modifications.
+
+You can also combine `nix_config` with `[build].nix_deps` — both are merged without duplication:
+
+```toml
+[project]
+nix_config = "./shell.nix"
+
+[build]
+nix_deps = ["protobuf", "grpc"]   # added on top of shell.nix
+```
 
 ## Git Sources and Versions
 

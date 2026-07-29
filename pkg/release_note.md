@@ -49,7 +49,29 @@ CPM solves all of these:
 
 ## Features
 
-### Three kinds of dependencies
+### Nix Config — inherit your own shell
+
+Set `nix_config = "./shell.nix"` in `[project]` to bring your own nix-shell
+configuration. CPM merges its auto-detected dependencies into your shell without
+duplication — your `shellHook`, overlays, and nixpkgs pin are all preserved.
+
+```toml
+[project]
+nix_config = "./shell.nix"
+```
+
+```nix
+# shell.nix — only declare what CPM doesn't auto-detect
+{ pkgs ? import <nixpkgs> {} }:
+pkgs.mkShell {
+  packages = with pkgs; [ openssl postgresql spdlog ];
+  shellHook = "echo dev shell ready";
+}
+```
+
+CPM reads your package list, compares it with what it detects from the source
+tree, and only injects what is missing. If your file already covers everything,
+it is used as-is.
 
 **Header-only** (`[dependencies]`) — cloned from Git, linked into `.cpm/packages/`.
 No build step. Works with any layout (`include/`, `single_include/`, `src/`).
