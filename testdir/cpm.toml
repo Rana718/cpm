@@ -7,6 +7,7 @@ description = "REST API for countries - Seastar + nlohmann/json"
 cpp_standard = "20"
 # compiler = "gcc-13"
 nixpkgs = "nixos-24.05"
+nix_config = "./shell.nix"
 entry = "main.cpp"
 
 output = "countries-api"
@@ -20,3 +21,6 @@ json = "github:nlohmann/json"
 [system-dependencies]
 seastar = "github:scylladb/seastar"
 llhttp = "github:nodejs/llhttp"
+
+[build]
+link_libraries = ["pq", "spdlog"]

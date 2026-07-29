@@ -479,7 +479,8 @@ bool Downloader::build_from_source(const std::string &name, const fs::path &sour
             compiler = "gcc";
         else if (compiler == "clang")
             compiler = "clang";
-        std::string expression = nix.generate_shell_nix(compiler, config.cpp_standard, dependencies);
+        std::string expression = nix.generate_shell_nix(compiler, config.cpp_standard, dependencies,
+            (!config.nix_config.empty() && !project_root.empty()) ? project_root / config.nix_config : fs::path{});
         if (!config.nixpkgs.empty()) {
             const auto import = expression.find("import <nixpkgs>");
             if (import != std::string::npos) {

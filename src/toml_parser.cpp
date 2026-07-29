@@ -290,6 +290,13 @@ ProjectConfig TomlParser::parse(const std::filesystem::path &toml_path) {
                     config.compiler = value;
                 else if (key == "nixpkgs")
                     config.nixpkgs = value;
+                else if (key == "nix_config") {
+                    if (!value.ends_with(".nix"))
+                        throw std::runtime_error("nix_config must point to a .nix file");
+                    if (!safe_project_path(value))
+                        throw std::runtime_error("nix_config must be a relative path inside the project");
+                    config.nix_config = value;
+                }
                 else if (key == "entry")
                     config.entry = value;
                 else if (key == "output")

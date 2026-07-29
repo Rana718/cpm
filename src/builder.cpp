@@ -89,7 +89,8 @@ void append_package_flags(std::vector<std::string> &args, const fs::path &local_
 }
 
 // Append -L, archive, and -l flags for everything under library_dir.
-void append_library_flags(std::vector<std::string> &args, const fs::path &library_dir, const std::vector<NixLibrary> &nix_libraries, const std::vector<std::string> &link_libraries, std::set<std::string> &linked) {
+void append_library_flags(std::vector<std::string> &args, const fs::path &library_dir, const std::vector<NixLibrary> &nix_libraries, const std::vector<std::string> &link_libraries,
+    std::set<std::string> &linked) {
     if (!fs::is_directory(library_dir)) {
         for (const auto &lib : link_libraries) {
             const auto flag = lib.starts_with("-") || lib.find('/') != std::string::npos ? lib : "-l" + lib;
@@ -356,31 +357,38 @@ fs::path Builder::create_project_shell(const ProjectConfig &config) const {
     NixEnv nix(local_cpm_dir_, global_cache_dir_);
     const auto compiler = nix_compiler(config.compiler);
     const bool versioned_compiler = config.compiler.starts_with("gcc-") || config.compiler.starts_with("clang-");
-    const bool required = !config.nix_libraries.empty() || !config.extra_nix_deps.empty() || versioned_compiler;
+    const bool has_user_config = !config.nix_config.empty() && fs::exists(project_root_ / config.nix_config);
+    const bool required = !config.nix_libraries.empty() || !config.extra_nix_deps.empty() || versioned_compiler || has_user_config;
     if (!required) return {};
     if (!nix.available()) {
         const auto host_compiler = config.compiler.starts_with("gcc-") ? "g++-" + config.compiler.substr(4) : "clang++-" + config.compiler.substr(6);
-        if (versioned_compiler && config.nix_libraries.empty() && config.extra_nix_deps.empty() && Process::command_exists(host_compiler)) return {};
+        if (versioned_compiler && config.nix_libraries.empty() && config.extra_nix_deps.empty() && !has_user_config && Process::command_exists(host_compiler)) return {};
         throw std::runtime_error("this project requires Nix, but nix-shell and nix-build are not available");
     }
-    if (compiler.empty() && versioned_compiler) {
-        throw std::runtime_error("cannot map compiler '" + config.compiler + "' to a Nix package");
+    if (compiler.empty() && versioned_compiler) throw std::runtime_error("cannot map compiler '" + config.compiler + "' to a Nix package");
+
+    // Build the full list of CPM-managed packages (compiler + pkg-config + nix libs + extra deps).
+    std::vector<std::string> cpm_deps;
+    if (!compiler.empty()) cpm_deps.emplace_back(compiler);
+    cpm_deps.emplace_back("pkg-config");
+    for (const auto &library : config.nix_libraries) cpm_deps.emplace_back(library.nix_attr);
+    for (const auto &dep : config.extra_nix_deps) cpm_deps.emplace_back(dep);
+
+    // generate_shell_nix deduplicates and merges with user config if provided.
+    const fs::path user_config = has_user_config ? project_root_ / config.nix_config : fs::path{};
+    std::string expression = nix.generate_shell_nix(compiler, config.cpp_standard, cpm_deps, user_config);
+
+    if (!config.nixpkgs.empty() && !has_user_config) {
+        const auto import = expression.find("import <nixpkgs>");
+        if (import != std::string::npos)
+            expression.replace(import, std::string("import <nixpkgs>").size(), "import (builtins.fetchTarball { url = \"https://github.com/NixOS/nixpkgs/archive/" + config.nixpkgs + ".tar.gz\"; })");
     }
 
     const auto shell = local_cpm_dir_ / "project_shell.nix";
     std::ofstream output(shell, std::ios::trunc);
-    if (!config.nixpkgs.empty()) {
-        output << "{ pkgs ? import (builtins.fetchTarball { url = \"https://github.com/NixOS/nixpkgs/archive/" << config.nixpkgs << ".tar.gz\"; }) {} }:\n";
-    } else {
-        output << "{ pkgs ? import <nixpkgs> {} }:\n";
-    }
-    output << "pkgs.mkShell {\n  packages = with pkgs; [";
-    if (!compiler.empty()) output << " " << compiler;
-    output << " pkg-config";
-    for (const auto &library : config.nix_libraries) output << " " << library.nix_attr;
-    for (const auto &dependency : config.extra_nix_deps) output << " " << dependency;
-    output << " ];\n}\n";
+    output << expression;
     output.close();
+
     const auto check = Process::run({"nix-shell", shell.string(), "--run", "true"}, {}, {}, true);
     if (check.exit_code != 0) throw std::runtime_error("cannot create required project Nix shell:\n" + check.output);
     return shell;
@@ -507,9 +515,9 @@ void Builder::bundle_production(const ProjectConfig &config) const {
             std::string dependency;
             fields >> dependency;
             // Bundle nix-store, .cpm/lib, and system runtime libraries (/usr/lib).
-            // Exclude only the core C runtime that must come from the target system.
+            // the entire glibc stack (libc, libm, libdl, libpthread, librt, etc.)
             const auto fname = fs::path(dependency).filename().string();
-            if (fname.starts_with("libc.so") || fname.starts_with("libm.so") || fname.starts_with("libdl.so") || fname.starts_with("ld-linux")) continue;
+            if (fname.starts_with("ld-linux") || fname.starts_with("ld.so")) continue;
             const bool from_nix = dependency.starts_with("/nix/store/");
             const bool from_cpm = dependency.starts_with((local_cpm_dir_ / "lib").string());
             const bool from_sys = dependency.starts_with("/usr/lib") || dependency.starts_with("/lib");
@@ -534,14 +542,34 @@ void Builder::bundle_production(const ProjectConfig &config) const {
             }
         }
     }
+    std::string interp_filename; // ld-linux filename if we manage to copy it
     if (Process::command_exists("patchelf")) {
         Process::run({"patchelf", "--set-rpath", "$ORIGIN", distributed_binary.string()}, {}, {}, true);
+
+        const auto ri = Process::run({"patchelf", "--print-interpreter", distributed_binary.string()}, {}, {}, true);
+        if (ri.exit_code == 0) {
+            std::string interp = ri.output;
+            while (!interp.empty() && (interp.back() == '\n' || interp.back() == '\r')) interp.pop_back();
+            if (!interp.empty() && fs::is_regular_file(interp)) {
+                interp_filename = fs::path(interp).filename().string();
+                std::error_code ec;
+                fs::copy_file(interp, distribution / interp_filename, fs::copy_options::overwrite_existing, ec);
+                if (ec) interp_filename.clear(); // copy failed, fall back to direct exec
+            }
+        }
     }
+
     const auto launcher = distribution / "run.sh";
     std::ofstream script(launcher, std::ios::trunc);
-    script << "#!/bin/sh\nDIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n"
-           << "export LD_LIBRARY_PATH=\"$DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\"\n"
-           << "exec \"$DIR\"/" << shell_quote(binary.filename().string()) << " \"$@\"\n";
+    script << "#!/bin/sh\n"
+           << "DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n"
+           << "export LD_LIBRARY_PATH=\"$DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\"\n";
+    if (!interp_filename.empty()) {
+        script << "exec \"$DIR\"/" << shell_quote(interp_filename) << " --library-path \"$DIR\" "
+               << "\"$DIR\"/" << shell_quote(binary.filename().string()) << " \"$@\"\n";
+    } else {
+        script << "exec \"$DIR\"/" << shell_quote(binary.filename().string()) << " \"$@\"\n";
+    }
     script.close();
     fs::permissions(launcher, fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec | fs::perms::others_read | fs::perms::others_exec);
     std::cout << "[cpm] Built optimized bundle: " << distribution.string() << "\n";
