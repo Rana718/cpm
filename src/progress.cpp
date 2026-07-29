@@ -32,11 +32,10 @@ static std::string elapsed_str(std::chrono::steady_clock::time_point start) {
     if (ms < 1000) {
         ss << ms << "ms";
     } else {
-        ss << std::fixed << std::setprecision(1) << (ms / 1000.0) << "s";
+        ss << std::fixed << std::setprecision(1) << (static_cast<double>(ms) / 1000.0) << "s";
     }
     return ss.str();
 }
-
 
 ProgressDisplay::ProgressDisplay() = default;
 ProgressDisplay::~ProgressDisplay() { stop(); }
@@ -56,6 +55,7 @@ void ProgressDisplay::set_status(int task_id, TaskStatus status, const std::stri
 }
 
 void ProgressDisplay::start() {
+    stopped_ = false;
     running_ = true;
     display_thread_ = std::thread([this]() {
         while (running_) {
@@ -66,6 +66,7 @@ void ProgressDisplay::start() {
 }
 
 void ProgressDisplay::stop() {
+    if (stopped_.exchange(true)) return;
     running_ = false;
     if (display_thread_.joinable()) display_thread_.join();
 
@@ -160,7 +161,6 @@ void ProgressDisplay::render() {
     std::cout << line << std::flush;
 }
 
-
 // Braille spinner with a wider set for a smoother animation
 static const char *k_build_frames[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
 static constexpr int k_num_frames = 10;
@@ -203,7 +203,6 @@ void BuildSpinner::loop() {
         std::this_thread::sleep_for(std::chrono::milliseconds(80));
     }
 }
-
 
 void parallel_execute(const std::vector<std::function<void()>> &tasks, int max_parallel) {
     if (tasks.empty()) return;

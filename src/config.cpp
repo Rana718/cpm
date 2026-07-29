@@ -1,63 +1,79 @@
 #include "cpm/config.hpp"
 
-#include <array>
-#include <cstdio>
+#include "cpm/process.hpp"
+
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
-#include <memory>
+#include <regex>
 #include <stdexcept>
 #include <string>
 #include <sys/utsname.h>
 
 namespace cpm {
+namespace {
 
-static std::string exec_command(const std::string &cmd) {
-    std::array<char, 256> buffer;
-    std::string result;
-    auto pipe = std::unique_ptr<FILE, int (*)(FILE *)>(popen(cmd.c_str(), "r"), pclose);
-    if (!pipe) return "";
-    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) result += buffer.data();
-    while (!result.empty() && (result.back() == '\n' || result.back() == '\r')) result.pop_back();
-    return result;
+std::string trim(std::string value) {
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) value.pop_back();
+    const auto start = value.find_first_not_of(" \t\r\n");
+    return start == std::string::npos ? std::string{} : value.substr(start);
 }
 
+std::string detected_cxx() {
+    if (Process::command_exists("c++")) return "c++";
+    if (Process::command_exists("g++")) return "g++";
+    if (Process::command_exists("clang++")) return "clang++";
+    return {};
+}
+
+} // namespace
+
 std::filesystem::path Config::get_global_cache_dir() {
-    const char *home = std::getenv("HOME");
-    if (!home) throw std::runtime_error("Cannot determine home directory");
-    return std::filesystem::path(home) / ".cpm" / "cache";
+    if (const char *configured = std::getenv("CPM_CACHE_DIR"); configured && *configured) return configured;
+    if (const char *xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg) return std::filesystem::path(xdg) / "cpm";
+    if (const char *home = std::getenv("HOME"); home && *home) return std::filesystem::path(home) / ".cache" / "cpm";
+    throw std::runtime_error("cannot determine the cache directory; set CPM_CACHE_DIR");
 }
 
 std::filesystem::path Config::get_local_cpm_dir() { return std::filesystem::current_path() / ".cpm"; }
-
 std::filesystem::path Config::get_toml_path() { return std::filesystem::current_path() / "cpm.toml"; }
-
 std::filesystem::path Config::get_resolve_header_path() { return std::filesystem::current_path() / "resolve.h"; }
 
 std::string Config::get_architecture() {
-    struct utsname buf{};
-    if (uname(&buf) == 0) return buf.machine;
-    return exec_command("uname -m");
+    struct utsname information{};
+    return uname(&information) == 0 ? information.machine : "unknown";
 }
 
-std::string Config::get_os() { return "linux"; }
+std::string Config::get_os() {
+    struct utsname information{};
+    if (uname(&information) != 0) return "unknown";
+    std::string os = information.sysname;
+    std::ranges::transform(os, os.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return os;
+}
 
 std::string Config::get_compiler() {
-#if defined(__clang__)
-    return "clang";
-#elif defined(__GNUC__)
-    return "gcc";
-#else
-    if (std::system("g++ --version > /dev/null 2>&1") == 0) return "gcc";
-    if (std::system("clang++ --version > /dev/null 2>&1") == 0) return "clang";
-    return "unknown";
-#endif
+    auto compiler = detected_cxx();
+    if (compiler.empty()) return "unknown";
+    auto output = Process::run({compiler, "--version"}, {}, {}, true).output;
+    std::ranges::transform(output, output.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (output.find("clang") != std::string::npos) return "clang";
+    if (output.find("gcc") != std::string::npos || output.find("g++") != std::string::npos) return "gcc";
+    return compiler;
 }
 
 std::string Config::get_compiler_version() {
-    std::string compiler = get_compiler();
-    if (compiler == "gcc") return exec_command("g++ -dumpversion");
-    if (compiler == "clang") return exec_command(R"(clang++ --version 2>&1 | head -1 | grep -oP '\d+\.\d+\.\d+')");
-    return "unknown";
+    const auto compiler = detected_cxx();
+    if (compiler.empty()) return "unknown";
+    if (get_compiler() == "gcc") {
+        const auto result = Process::run({compiler, "-dumpfullversion", "-dumpversion"}, {}, {}, true);
+        if (result.exit_code == 0 && !trim(result.output).empty()) return trim(result.output);
+    }
+    const auto result = Process::run({compiler, "--version"}, {}, {}, true);
+    static const std::regex version(R"(([0-9]+(?:\.[0-9]+){1,2}))");
+    std::smatch match;
+    return std::regex_search(result.output, match, version) ? match[1].str() : "unknown";
 }
 
 std::string Config::get_cpp_standard() {

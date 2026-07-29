@@ -34,8 +34,8 @@ class Builder {
     // Return the compiler binary to use for a given config
     [[nodiscard]] std::string detect_compiler(const ProjectConfig &config) const;
 
-    // Return the full g++ invocation string for a normal build
-    [[nodiscard]] std::string build_compile_command(const ProjectConfig &config) const;
+    // Return the compiler invocation without shell interpolation.
+    [[nodiscard]] std::vector<std::string> build_compile_arguments(const ProjectConfig &config, bool optimized) const;
 
     // Where the output binary goes
     [[nodiscard]] std::filesystem::path get_output_path(const ProjectConfig &config) const;
@@ -44,13 +44,11 @@ class Builder {
     [[nodiscard]] std::set<std::string> collect_include_dirs(const ProjectConfig &config) const;
 
     // Return all .cpp source files under project_root (same skip list)
-    [[nodiscard]] std::vector<std::filesystem::path> collect_source_files(const std::string &entry_abs) const;
+    [[nodiscard]] std::vector<std::filesystem::path> collect_source_files(const ProjectConfig &config, const std::string &entry_abs) const;
 
-    // imgui backend: is this backend compilable given current .cpm/include/ state?
-    [[nodiscard]] bool backend_is_available(const std::string &stem) const;
+    [[nodiscard]] std::filesystem::path create_project_shell(const ProjectConfig &config) const;
 
-    // Apply lightweight source patches before compiling (e.g. glm mat4 typos)
-    void auto_patch_sources() const;
+    int compile_incrementally(const ProjectConfig &config, const std::vector<std::string> &arguments, const std::filesystem::path &shell_nix, std::string &output) const;
 
     // Build the dist/ production bundle after a successful static build
     void bundle_production(const ProjectConfig &config) const;

@@ -17,12 +17,12 @@ class Installer {
     void install();
 
     // Add a single package by spec (e.g. "github:user/repo@v1.0")
-    void install_package(const std::string &package_spec);
+    void install_package(const std::string &package_spec, const std::string &kind = "header");
 
     // Remove a named package
     void remove_package(const std::string &package_name);
 
-    // Nuke all caches and re-install everything
+    // Refresh unpinned refs and rebuild the project environment.
     void update();
 
     // List installed packages to stdout
@@ -33,15 +33,9 @@ class Installer {
     std::filesystem::path local_cpm_dir_;
     std::filesystem::path global_cache_dir_;
 
-    // Remove .cpm/ entries that are no longer in cpm.toml
-    void auto_remove_stale_packages(const ProjectConfig &config);
-    void auto_remove_stale_libs(const ProjectConfig &config);
-    void auto_remove_stale_includes(const ProjectConfig &config);
-
     // Resolve [libs] entries via nix-build, symlink into .cpm/
-    void resolve_nix_libraries(const ProjectConfig &config);
-
-    void ensure_directories() const;
+    void resolve_nix_libraries(const ProjectConfig &config, const std::filesystem::path &target_cpm_dir);
+    void install_impl(bool refresh_lock);
 };
 
 } // namespace cpm

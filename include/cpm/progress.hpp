@@ -40,6 +40,7 @@ class ProgressDisplay {
     std::vector<TaskProgress> tasks_;
     std::mutex mutex_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> stopped_{true};
     std::thread display_thread_;
 
     void render();

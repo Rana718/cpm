@@ -1,329 +1,196 @@
-# CPM — C/C++ Package Manager
+# CPM
 
-A fast, isolated package manager for C and C++ projects. Like `uv` for Python, but for C++ and C.
+CPM is a project-local C and C++ package and environment manager for Linux. It resolves Git dependencies, builds compiled libraries, can obtain system libraries through Nix, and keeps generated headers, libraries, tools, and build metadata inside `.cpm/`.
+
+## Isolation Boundary
+
+Normal CPM commands never install into `/usr`, `/usr/local`, or another system prefix. Package builds use a temporary prefix and are published into the project only after every dependency succeeds. A failed install leaves the previous `.cpm/` environment active.
+
+CPM still uses the host kernel and, unless a Nix compiler is selected, the host compiler and C runtime. `cpm setup` is the one command that intentionally installs Nix on the machine. Production bundles remain subject to the target machine's libc and kernel ABI.
+
+## Build
 
 ```bash
-# Install
-curl -fsSL https://raw.githubusercontent.com/Rana718/cpm/main/install.sh | bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
 ```
 
-## Features
+Install the CLI with:
 
-- **`cpm run`** — install deps + build + run in one command
-- **`cpm run file.cpp`** — compile and run single files (like `uv run`)
-- **`cpm build -s`** — optimized production binary + portable bundle
-- **Fully isolated** — never pollutes system (`/usr/local` untouched)
-- **Nix-powered** — reproducible builds, correct compiler versions, all deps pre-built
-- **Parallel downloads** with live progress
-- **Auto-resolves** latest GitHub tags
-- **Multi-file** projects supported (`src/` directory)
-- **Editor support** — auto-generates `compile_commands.json` for clangd
+```bash
+cmake --install build --prefix "$HOME/.local"
+```
+
+Or use the user-local bootstrap (it does not run `sudo` or install OS packages):
+
+```bash
+./install.sh
+./install.sh --prefix "$HOME/.local" --with-nix # explicit Nix opt-in
+```
 
 ## Quick Start
 
 ```bash
-# Create a new project
-mkdir myapp && cd myapp
-cpm init myapp
-
-# Add dependencies
-# Edit cpm.toml:
-#   [dependencies]
-#   json = "github:nlohmann/json"
-
-# Build and run
+mkdir hello && cd hello
+cpm init hello
+cpm add json=github:nlohmann/json@v3.11.3
 cpm run
 ```
 
-## Install
+`cpm install` creates:
 
-### One-line install (any Linux)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Rana718/cpm/main/install.sh | bash
+```text
+.cpm/
+  include/       exported compiled/Nix headers
+  lib/           isolated library links
+  packages/      links to header-package cache entries
+  objects/       incremental project object cache
+  bin/
+  activate.sh
+cpm.lock         requested refs and resolved commit SHAs
+compile_commands.json
 ```
 
-This installs:
+The global cache is selected in this order:
 
-- System build tools (cmake, ninja, g++)
-- Nix (for isolated builds)
-- cpm binary to `/usr/local/bin/`
+1. `CPM_CACHE_DIR`
+2. `$XDG_CACHE_HOME/cpm`
+3. `$HOME/.cache/cpm`
 
-### Manual install
-
-```bash
-git clone https://github.com/Rana718/cpm.git
-cd cpm
-./install.sh
-```
-
-### From source (development)
-
-```bash
-git clone https://github.com/Rana718/cpm.git
-cd cpm
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . -j$(nproc)
-sudo cp cpm /usr/local/bin/
-```
-
-### Verify
-
-```bash
-cpm --version
-# cpm 0.1.0
-```
-
-## Usage
-
-### Create a project
-
-```bash
-cpm init myapp
-```
-
-Creates:
-
-```
-myapp/
-├── cpm.toml
-├── main.cpp
-├── .cpm/
-└── compile_commands.json
-```
-
-### cpm.toml
+## Manifest
 
 ```toml
 [project]
-name = "myapp"
+name = "service"
 version = "0.1.0"
-cpp_standard = "20"       # 11, 14, 17, 20, 23, 26
-compiler = "gcc-13"       # optional: gcc, gcc-13, clang-17
-entry = "main.cpp"        # can be a .cpp or .h file
-output = "myapp"
+cpp_standard = "20"
+compiler = "gcc-13" # optional; uses Nix when available
+nixpkgs = "nixos-24.05" # recommended when using Nix
+entry = "src/main.cpp"
+output = "service"
 
 [scripts]
-start = "./myapp"
+start = "./service --port 8080"
 
 [dependencies]
-# Header-only libraries (fast, just clone)
 json = "github:nlohmann/json@v3.11.3"
-fmt = "github:fmtlib/fmt"              # latest tag
+local_headers = "file:///workspace/headers@main"
 
 [system-dependencies]
-# Compiled libraries (built from source in nix-shell)
-hiredis = "github:redis/hiredis"
-sdl3 = "github:libsdl-org/SDL@release-3.2.14"
+hiredis = "github:redis/hiredis@v1.2.0"
+custom = "https://git.example.com/team/custom.git@release/2"
 
 [libs]
-# System libraries resolved via nix (headers + .so linked into .cpm/)
-glew   = "glew"
-opengl = "libGL"
+ssl = "openssl"
+compression = "zlib"
+
+[build]
+include_paths = ["include", "generated/include"]
+sources = ["generated/schema.cpp"]
+exclude_sources = ["tests", "benchmarks"]
+defines = ["SERVICE_FEATURE=1"]
+compile_options = ["-Wall", "-Wextra"]
+link_libraries = ["m"]
+link_options = ["-Wl,--as-needed"]
+nix_deps = ["boost", "yaml-cpp"]
 ```
 
-### Dependency Types
+Arrays must contain quoted strings. Unknown keys are ignored for forward compatibility. Invalid package names, Nix attributes, C++ standards, duplicate dependency names, and project path traversal are rejected with a file and line diagnostic.
 
-CPM supports three ways to add libraries depending on how they need to be consumed:
+## Dependency Kinds
 
-#### `[dependencies]` — Header-only libraries
+### Header Packages
 
-For libraries that don't need compilation (just `#include`). CPM clones the repo and symlinks headers into `.cpm/include/`.
-
-```toml
-[dependencies]
-json  = "github:nlohmann/json@v3.11.3"   # pinned version
-fmt   = "github:fmtlib/fmt"              # latest release tag
-glm   = "github:g-truc/glm@0.9.9.8"
-imgui = "github:ocornut/imgui@docking"   # branch name works too
-stb   = "github:nothings/stb"            # no tags → uses HEAD
-```
-
-**When to use:** Libraries that are purely headers (`.h` / `.hpp` files). No build step needed — fastest option.
-
-**Common header-only libraries:**
-
-| Package                 | cpm.toml entry                                       |
-| ----------------------- | ---------------------------------------------------- |
-| nlohmann/json           | `json = "github:nlohmann/json@v3.11.3"`              |
-| fmtlib/fmt              | `fmt = "github:fmtlib/fmt@10.1.1"`                   |
-| glm                     | `glm = "github:g-truc/glm@0.9.9.8"`                  |
-| spdlog                  | `spdlog = "github:gabime/spdlog@v1.12.0"`            |
-| imgui                   | `imgui = "github:ocornut/imgui@docking"`             |
-| stb                     | `stb = "github:nothings/stb"`                        |
-| entt                    | `entt = "github:skypjack/entt@v3.12.2"`              |
-| toml++                  | `tomlplusplus = "github:marzer/tomlplusplus@v3.4.0"` |
-| Catch2 (v3 header-only) | `catch2 = "github:catchorg/Catch2@v3.4.0"`           |
-
-#### `[system-dependencies]` — Compiled libraries (built from source)
-
-For libraries that produce `.a` / `.so` files and need to be compiled. CPM clones the source, builds it (using cmake/make/meson/autotools), and installs artifacts into `.cpm/lib/`.
-
-```toml
-[system-dependencies]
-hiredis    = "github:redis/hiredis@v1.2.0"
-sdl3       = "github:libsdl-org/SDL@release-3.2.14"
-uwebsocket = "github:uNetworking/uWebSockets@v20.62.0"
-```
-
-**When to use:** Libraries that need compilation (have `CMakeLists.txt`, `Makefile`, `meson.build`, etc.) and produce binary artifacts.
-
-**Build strategies (tried in order):**
-
-1. `cooking.sh` (inside nix-shell if available)
-2. `configure.py`
-3. CMake
-4. Makefile
-5. Meson
-6. Autotools (`./configure`)
-7. Header-only fallback (just copies headers)
-
-**Common compiled libraries:**
-
-| Package | cpm.toml entry                                  |
-| ------- | ----------------------------------------------- |
-| SDL3    | `sdl3 = "github:libsdl-org/SDL@release-3.2.14"` |
-| hiredis | `hiredis = "github:redis/hiredis@v1.2.0"`       |
-| raylib  | `raylib = "github:raysan5/raylib@5.0"`          |
-| GLFW    | `glfw = "github:glfw/glfw@3.3.9"`               |
-| libcurl | `curl = "github:curl/curl@curl-8_5_0"`          |
-| SQLite  | `sqlite = "github:sqlite/sqlite"`               |
-| zlib    | `zlib = "github:madler/zlib@v1.3.1"`            |
-
-#### `[libs]` — System libraries via Nix
-
-For system-level libraries (OpenGL, Vulkan, audio drivers, etc.) that are best provided pre-built by the package manager. CPM uses `nix-build` to fetch pre-compiled binaries and symlinks their headers and `.so` files into `.cpm/`.
-
-```toml
-[libs]
-glew    = "glew"
-opengl  = "libGL"
-vulkan  = "vulkan-loader"
-sdl2    = "SDL2"
-openal  = "openal"
-freetype = "freetype"
-```
-
-**When to use:** System libraries that are complex to build from source, have many transitive dependencies, or are tightly coupled to the OS (graphics drivers, audio, etc.).
-
-**Requires:** Nix installed (`cpm setup` to install).
-
-**The value is the nixpkgs attribute name.** Find package names at https://search.nixos.org/packages.
-
-**Common system libraries:**
-
-| Package    | cpm.toml entry             | Provides              |
-| ---------- | -------------------------- | --------------------- |
-| OpenGL     | `opengl = "libGL"`         | `-lGL`                |
-| GLEW       | `glew = "glew"`            | `-lGLEW`, `GL/glew.h` |
-| Vulkan     | `vulkan = "vulkan-loader"` | `-lvulkan`            |
-| SDL2       | `sdl2 = "SDL2"`            | `-lSDL2`              |
-| FreeType   | `freetype = "freetype"`    | `-lfreetype`          |
-| OpenAL     | `openal = "openal"`        | `-lopenal`            |
-| ALSA       | `alsa = "alsa-lib"`        | `-lasound`            |
-| PulseAudio | `pulse = "libpulseaudio"`  | `-lpulse`             |
-| X11        | `x11 = "xorg.libX11"`      | `-lX11`               |
-| Wayland    | `wayland = "wayland"`      | `-lwayland-client`    |
-
-### Choosing the Right Section
-
-```
-┌─────────────────────────────────────────────────────────┐
-│ Is it header-only? (no .cpp/.c to compile)              │
-│   YES → [dependencies]                                  │
-│   NO  ↓                                                 │
-│ Is it a GitHub project you can build from source?       │
-│   YES → [system-dependencies]                           │
-│   NO  ↓                                                 │
-│ Is it a system/OS-level library (GL, audio, drivers)?   │
-│   YES → [libs] (needs nix)                              │
-└─────────────────────────────────────────────────────────┘
-```
-
-### Commands
+Entries in `[dependencies]` are cloned into the global content cache and linked into `.cpm/packages/`. CPM adds the repository root and conventional `include/`, `single_include/`, and `src/` roots to compiler arguments without flattening one package over another.
 
 ```bash
-cpm init <name>       # Create new project
-cpm install           # Install all dependencies
-cpm build             # Compile
-cpm build -s          # Production build (optimized + portable bundle)
-cpm run               # Install + build + run
-cpm run file.cpp      # Compile and run a single file
-cpm start             # Run the built binary
-cpm add <pkg>         # Add: cpm add github:redis/hiredis
-cpm remove <name>     # Remove package
-cpm update            # Re-download all
-cpm list              # Show installed
-cpm setup             # Install nix backend
-cpm --version         # Show version
+cpm add json=github:nlohmann/json@v3.11.3
 ```
 
-### Run single files
+### Compiled Git Packages
+
+Entries in `[system-dependencies]` are built with the first applicable standard adapter:
+
+- CMake
+- Meson
+- Autotools `configure`
+- `configure.py`
+- Make
+- `cooking.sh`
+- header-only fallback
+
+Artifacts are installed to a package-specific cache prefix, never a system prefix. CMake/Meson install metadata and `pkg-config --static` flags are retained for the project link.
 
 ```bash
-# Without a project — uses system g++
-cpm run hello.cpp
-cpm run test.c
-
-# Inside a project — uses project's dependencies
-cpm run quick.cpp     # can use #include <nlohmann/json.hpp>
+cpm add --system hiredis=github:redis/hiredis@v1.2.0
 ```
 
-### Production build
+CPM derives common CMake package names for a Nix build shell. Add ambiguous or differently named packages explicitly through `[build].nix_deps`.
+
+### Nix Libraries
+
+Entries in `[libs]` are resolved from nixpkgs and linked into `.cpm/include` and `.cpm/lib`.
 
 ```bash
+cpm add --lib ssl=openssl
+```
+
+Pin `[project].nixpkgs` for repeatable Nix resolution. Without a pin, the configured host nixpkgs channel is used.
+
+## Git Sources and Versions
+
+Supported source forms include:
+
+```toml
+a = "github:owner/repository@v1.2.3"
+b = "https://host/owner/repository.git@release/1"
+c = "git@host:owner/repository.git@main"
+d = "file:///absolute/local/repository@commit-or-tag"
+```
+
+The ref may be a tag, branch, slash-containing branch, or full commit. If omitted, CPM resolves the highest remote version-sorted tag, falling back to `HEAD`. CPM writes the requested ref and immutable commit SHA to `cpm.lock`; later installs reuse that exact commit. `cpm update` resolves moving refs again. Commit `cpm.lock` to version control.
+
+Cache keys include the source URL and encoded ref, preventing aliases with the same name/version from sharing unrelated content.
+
+## Commands
+
+```text
+cpm init <name>
+cpm install
+cpm add [alias=]git-source
+cpm add --system [alias=]git-source
+cpm add --lib [alias=]nix-attribute
+cpm remove <alias>
+cpm update
+cpm list
+cpm build
 cpm build -s
+cpm run
+cpm run file.cpp
+cpm start
+cpm info
+cpm setup
 ```
 
-Produces a `dist/` folder:
+`add` and `remove` update `cpm.toml` atomically and roll it back if installation fails. `remove` works across all three dependency sections. `run file.cpp` compiles into `.cpm/run/`, executes it, and removes the temporary binary.
 
-```
-dist/
-├── myapp             # optimized, stripped binary
-├── lib*.so           # bundled dependencies
-└── run.sh            # portable launcher
-```
+## Build Performance
 
-Copy `dist/` to any Linux server and run:
+Project translation units compile in parallel. Objects are keyed by compiler flags and retained in `.cpm/objects`; unchanged sources and headers are not recompiled. Static archives are linked as a group to avoid declaration-order failures. Paths and compiler arguments are executed with `posix_spawn`, not interpolated into a shell command.
+
+`cpm build -s` enables `-O3 -DNDEBUG`, copies required project-local/Nix shared libraries into `dist/`, sets an origin-relative rpath when `patchelf` is available, and writes `dist/run.sh`.
+
+## Development Checks
 
 ```bash
-./dist/run.sh
+cmake -S . -B build -DBUILD_TESTING=ON
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+
+cmake -S . -B build-san -DCPM_ENABLE_SANITIZERS=ON
+cmake --build build-san --parallel
+ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build-san --output-on-failure
 ```
 
-## How It Works
-
-1. **Header-only packages** → git clone, symlink headers to `.cpm/include/`
-2. **Compiled packages** → build inside `nix-shell` (provides correct compiler + all deps)
-3. **All artifacts** → stored in `.cpm/` (local) and `~/.cpm/cache/` (global)
-4. **Nothing** touches `/usr/local/` or system libraries
-5. **Nix** provides pre-built binaries from `cache.nixos.org` — most deps don't need local compilation
-
-## Requirements
-
-- Linux (x86_64)
-- `git`, `curl`
-- `nix` (auto-installed by `install.sh`)
-
-## Development
-
-```bash
-# Build
-task
-
-# Format code
-task fmt
-
-# Lint
-task lint
-
-# Install to system
-task install
-
-# Clean
-task clean
-```
-
-## License
-
-[MIT](LICENSE)
+The core tests cover manifest parsing and mutation, path traversal rejection, shell-safe process arguments, environment/header isolation, paths containing spaces, and incremental object reuse.

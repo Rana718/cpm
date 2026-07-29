@@ -7,6 +7,15 @@
 #include <string>
 
 namespace cpm {
+namespace {
+
+std::string shell_literal(const std::string &value) {
+    std::string literal = "'";
+    for (const char c : value) literal += c == '\'' ? "'\\''" : std::string(1, c);
+    return literal + "'";
+}
+
+} // namespace
 
 Environment::Environment(const std::filesystem::path &project_root) : project_root_(project_root), cpm_dir_(project_root / ".cpm") {}
 
@@ -55,29 +64,39 @@ std::filesystem::path Environment::get_packages_dir() const { return cpm_dir_ / 
 std::string Environment::generate_activation_script() const {
     std::ostringstream s;
     s << "#!/bin/bash\n";
-    s << "# CPM Environment Activation Script\n";
-    s << "# Usage: source .cpm/activate.sh\n\n";
-
+    s << "# Source this file: source .cpm/activate.sh\n\n";
+    s << "if [ \"${CPM_ACTIVE:-}\" = 1 ] && [ \"${CPM_ROOT:-}\" = " << shell_literal(cpm_dir_.string()) << " ]; then\n"
+      << "    return 0 2>/dev/null || exit 0\n"
+      << "fi\n"
+      << "if command -v cpm_deactivate >/dev/null 2>&1; then cpm_deactivate; fi\n\n";
+    s << "export CPM_OLD_CPATH=\"${CPATH-}\"\n";
+    s << "export CPM_OLD_LIBRARY_PATH=\"${LIBRARY_PATH-}\"\n";
+    s << "export CPM_OLD_LD_LIBRARY_PATH=\"${LD_LIBRARY_PATH-}\"\n";
+    s << "export CPM_OLD_PKG_CONFIG_PATH=\"${PKG_CONFIG_PATH-}\"\n";
+    s << "export CPM_OLD_CMAKE_PREFIX_PATH=\"${CMAKE_PREFIX_PATH-}\"\n";
+    s << "export CPM_OLD_PATH=\"${PATH-}\"\n\n";
     s << "export CPM_ACTIVE=1\n";
-    s << "export CPM_ROOT=\"" << cpm_dir_.string() << "\"\n\n";
-
-    s << "# Save old paths for deactivation\n";
-    s << "export CPM_OLD_CPATH=\"$CPATH\"\n";
-    s << "export CPM_OLD_LIBRARY_PATH=\"$LIBRARY_PATH\"\n";
-    s << "export CPM_OLD_LD_LIBRARY_PATH=\"$LD_LIBRARY_PATH\"\n";
-    s << "export CPM_OLD_PKG_CONFIG_PATH=\"$PKG_CONFIG_PATH\"\n";
-    s << "export CPM_OLD_PATH=\"$PATH\"\n\n";
-
-    s << "# Set CPM paths (override system)\n";
-    s << "export CPATH=\"" << get_include_dir().string() << ":$CPATH\"\n";
-    s << "export LIBRARY_PATH=\"" << get_lib_dir().string() << ":$LIBRARY_PATH\"\n";
-    s << "export LD_LIBRARY_PATH=\"" << get_lib_dir().string() << ":$LD_LIBRARY_PATH\"\n";
-    s << "export PKG_CONFIG_PATH=\"" << (get_lib_dir() / "pkgconfig").string() << ":$PKG_CONFIG_PATH\"\n";
-    s << "export PATH=\"" << get_bin_dir().string() << ":$PATH\"\n\n";
-
-    s << "echo \"[cpm] Environment activated.\"\n";
-    s << "echo \"[cpm] Include: " << get_include_dir().string() << "\"\n";
-    s << "echo \"[cpm] Lib:     " << get_lib_dir().string() << "\"\n";
+    s << "export CPM_ROOT=" << shell_literal(cpm_dir_.string()) << "\n";
+    s << "export CPATH=" << shell_literal(get_include_dir().string()) << "${CPATH:+:$CPATH}\n";
+    s << "export LIBRARY_PATH=" << shell_literal(get_lib_dir().string()) << "${LIBRARY_PATH:+:$LIBRARY_PATH}\n";
+    s << "export LD_LIBRARY_PATH=" << shell_literal(get_lib_dir().string()) << "${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\n";
+    s << "export PKG_CONFIG_PATH=" << shell_literal((get_lib_dir() / "pkgconfig").string()) << "${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}\n";
+    s << "export CMAKE_PREFIX_PATH=" << shell_literal(cpm_dir_.string()) << "${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}\n";
+    s << "export PATH=" << shell_literal(get_bin_dir().string()) << ":$PATH\n\n";
+    s << "cpm_deactivate() {\n"
+      << "    export CPATH=\"$CPM_OLD_CPATH\"\n"
+      << "    export LIBRARY_PATH=\"$CPM_OLD_LIBRARY_PATH\"\n"
+      << "    export LD_LIBRARY_PATH=\"$CPM_OLD_LD_LIBRARY_PATH\"\n"
+      << "    export PKG_CONFIG_PATH=\"$CPM_OLD_PKG_CONFIG_PATH\"\n"
+      << "    export CMAKE_PREFIX_PATH=\"$CPM_OLD_CMAKE_PREFIX_PATH\"\n"
+      << "    export PATH=\"$CPM_OLD_PATH\"\n"
+      << "    unset CPM_ACTIVE CPM_ROOT CPM_OLD_CPATH CPM_OLD_LIBRARY_PATH CPM_OLD_LD_LIBRARY_PATH\n"
+      << "    unset CPM_OLD_PKG_CONFIG_PATH CPM_OLD_CMAKE_PREFIX_PATH CPM_OLD_PATH\n"
+      << "    unset -f cpm_deactivate\n"
+      << "}\n\n";
+    s << "printf '%s\\n' '[cpm] Environment activated.'\n";
+    s << "printf '%s\\n' " << shell_literal("[cpm] Include: " + get_include_dir().string()) << "\n";
+    s << "printf '%s\\n' " << shell_literal("[cpm] Lib:     " + get_lib_dir().string()) << "\n";
 
     return s.str();
 }

@@ -1,351 +1,177 @@
 #include "cpm/nix_env.hpp"
 
+#include "cpm/process.hpp"
+
 #include <algorithm>
-#include <array>
 #include <cctype>
-#include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <iterator>
-#include <memory>
+#include <map>
+#include <regex>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace cpm {
+namespace fs = std::filesystem;
+namespace {
 
-NixEnv::NixEnv(std::filesystem::path cpm_dir, std::filesystem::path global_cache) : cpm_dir_(std::move(cpm_dir)), global_cache_(std::move(global_cache)) {}
-
-bool NixEnv::available() const { return std::system("nix --version > /dev/null 2>&1") == 0; }
-
-std::string NixEnv::run_cmd(const std::string &cmd) {
-    std::array<char, 4096> buffer;
-    std::string result;
-    auto pipe = std::unique_ptr<FILE, int (*)(FILE *)>(popen(cmd.c_str(), "r"), pclose);
-    if (!pipe) return "";
-    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
-        result += buffer.data();
-    }
-    while (!result.empty() && (result.back() == '\n' || result.back() == '\r')) result.pop_back();
-    return result;
+bool valid_attribute(const std::string &attribute) {
+    return !attribute.empty() && std::ranges::all_of(attribute, [](unsigned char c) { return std::isalnum(c) || c == '-' || c == '_' || c == '.'; });
 }
 
-std::string NixEnv::cmake_to_nix(const std::string &cmake_name) {
-    // Map CMake find_package names to nixpkgs attribute names.
-    // Returns empty string for unknown names — callers must skip empty results.
-    std::string lower = cmake_name;
-    std::ranges::transform(lower, lower.begin(), ::tolower);
-
-    // Reject anything that isn't a plausible single identifier:
-    // real cmake package names contain only alnum, '-', '_', and '.'
-    for (char c : lower) {
-        if (!std::isalnum(static_cast<unsigned char>(c)) &&
-            c != '-' && c != '_' && c != '.') {
-            return {};
-        }
-    }
-
-    // Known cmake → nixpkgs mappings
-    if (lower == "boost")                          return "boost";
-    if (lower == "fmt")                            return "fmt_10";
-    if (lower == "yaml-cpp" || lower == "yamlcpp") return "yaml-cpp";
-    if (lower == "lz4")                            return "lz4";
-    if (lower == "gnutls")                         return "gnutls";
-    if (lower == "gmp")                            return "gmp";
-    if (lower == "nettle")                         return "nettle";
-    if (lower == "c-ares" || lower == "cares")     return "c-ares";
-    if (lower == "protobuf")                       return "protobuf";
-    if (lower == "hwloc")                          return "hwloc";
-    if (lower == "ragel")                          return "ragel";
-    if (lower == "liburing" || lower == "uring")   return "liburing";
-    if (lower == "numactl" || lower == "numa")     return "numactl";
-    if (lower == "openssl")                        return "openssl";
-    if (lower == "zlib")                           return "zlib";
-    if (lower == "libxml2" || lower == "xml2")     return "libxml2";
-    if (lower == "valgrind")                       return "valgrind";
-    if (lower == "lksctp-tools" || lower == "sctp") return "lksctp-tools";
-    if (lower == "dpdk")                           return "dpdk";
-    if (lower == "libtasn1")                       return "libtasn1";
-    if (lower == "p11-kit")                        return "p11-kit";
-    if (lower == "xfsprogs")                       return "xfsprogs";
-    if (lower == "libidn2")                        return "libidn2";
-    if (lower == "hiredis")                        return "hiredis";
-
-    // Unknown: return empty — caller will skip it rather than passing garbage to nix
-    return {};
+std::string normalized_package(std::string package) {
+    std::ranges::transform(package, package.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::ranges::replace(package, '_', '-');
+    return package;
 }
 
-std::vector<std::string> NixEnv::detect_nix_deps(const std::filesystem::path &src_path) {
-    namespace fs = std::filesystem;
-    std::set<std::string> deps;
-
-    // Always need build tools
-    deps.insert("cmake");
-    deps.insert("ninja");
-    deps.insert("pkg-config");
-    deps.insert("automake");
-    deps.insert("autoconf");
-    deps.insert("libtool");
-    deps.insert("python3");
-    deps.insert("git");
-    deps.insert("meson");
-
-    // Parse CMakeLists.txt AND all .cmake files in cmake/ for find_package calls
-    // (deps are often in separate files like cmake/SeastarDependencies.cmake)
-    std::vector<fs::path> cmake_files_to_scan;
-    auto cmake_file = src_path / "CMakeLists.txt";
-    if (fs::exists(cmake_file)) cmake_files_to_scan.push_back(cmake_file);
-
-    auto cmake_dir = src_path / "cmake";
-    if (fs::exists(cmake_dir)) {
-        for (const auto &entry : fs::directory_iterator(cmake_dir)) {
-            if (entry.path().extension() == ".cmake") {
-                cmake_files_to_scan.push_back(entry.path());
-            }
-        }
-    }
-
-    static const std::set<std::string> skip = {"Threads", "PkgConfig", "GnuInstallDirs",
-        "CMakePackageConfigHelpers", "CTest", "Python3", "Doxygen"};
-
-    for (const auto &cmake_path : cmake_files_to_scan) {
-        std::ifstream f(cmake_path);
-        std::string line;
-        while (std::getline(f, line)) {
-            auto pos = line.find("find_package");
-            if (pos == std::string::npos) continue;
-            auto paren = line.find('(', pos);
-            if (paren == std::string::npos) continue;
-            auto end_paren = line.find(')', paren);
-            if (end_paren == std::string::npos) continue;
-            std::istringstream iss(line.substr(paren + 1, end_paren - paren - 1));
-            std::string pkg_name;
-            iss >> pkg_name;
-            if (pkg_name.empty()) continue;
-
-            if (skip.count(pkg_name)) continue;
-
-            std::string nix_name = cmake_to_nix(pkg_name);
-            if (!nix_name.empty()) deps.insert(nix_name);
-        }
-    }
-
-    // Also check Find*.cmake filenames as dependency hints
-    if (fs::exists(cmake_dir)) {
-        for (const auto &entry : fs::directory_iterator(cmake_dir)) {
-            auto fname = entry.path().filename().string();
-            if (fname.starts_with("Find") && fname.find(".cmake") != std::string::npos) {
-                auto name = fname.substr(4, fname.size() - 10);
-                std::string nix_name = cmake_to_nix(name);
-                if (!nix_name.empty()) deps.insert(nix_name);
-            }
-        }
-    }
-
-    // If has cooking.sh, add stow (required by cooking mechanism)
-    if (fs::exists(src_path / "cooking.sh")) {
-        deps.insert("stow");
-    }
-
-    // If has install-dependencies.sh, DO NOT try to parse it —
-    // it is a full bash script with conditionals, not a package list.
-    // CMakeLists.txt find_package() analysis already covers what we need.
-
-    return std::vector<std::string>(deps.begin(), deps.end());
+std::string trim(std::string value) {
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) value.pop_back();
+    const auto start = value.find_first_not_of(" \t\r\n");
+    return start == std::string::npos ? std::string{} : value.substr(start);
 }
 
-std::string NixEnv::detect_compiler_for_project(const std::filesystem::path &src_path) {
-    namespace fs = std::filesystem;
+} // namespace
 
-    // Check CMakeLists.txt for CXX_STANDARD hints
-    auto cmake_file = src_path / "CMakeLists.txt";
-    if (fs::exists(cmake_file)) {
-        std::ifstream f(cmake_file);
-        std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+NixEnv::NixEnv(fs::path cpm_dir, fs::path global_cache) : cpm_dir_(std::move(cpm_dir)), global_cache_(std::move(global_cache)) {}
 
-        // If project uses C++23, needs GCC >= 13
-        if (content.find("CXX_STANDARD 23") != std::string::npos || content.find("c++23") != std::string::npos) {
-            return "gcc13";
+bool NixEnv::available() const { return Process::command_exists("nix-shell") && Process::command_exists("nix-build"); }
+
+std::vector<std::string> NixEnv::detect_nix_deps(const fs::path &source) const {
+    std::set<std::string> dependencies;
+    if (fs::exists(source / "CMakeLists.txt")) {
+        dependencies.insert("cmake");
+        dependencies.insert("ninja");
+    }
+    if (fs::exists(source / "meson.build")) {
+        dependencies.insert("meson");
+        dependencies.insert("ninja");
+    }
+    if (fs::exists(source / "configure") || fs::exists(source / "configure.ac")) {
+        dependencies.insert("autoconf");
+        dependencies.insert("automake");
+        dependencies.insert("libtool");
+    }
+    if (fs::exists(source / "configure.py")) {
+        dependencies.insert("python3");
+        dependencies.insert("ninja");
+        dependencies.insert("gnumake");
+    }
+    if (fs::exists(source / "cooking.sh")) {
+        dependencies.insert("cmake");
+        dependencies.insert("ninja");
+    }
+    if (fs::exists(source / "Makefile") || fs::exists(source / "makefile")) dependencies.insert("gnumake");
+    if (fs::exists(source / "package.json")) dependencies.insert("nodejs");
+    dependencies.insert("pkg-config");
+
+    static const std::set<std::string> cmake_builtins = {"cmakepackageconfighelpers", "ctest", "doxygen", "gnuinstalldirs", "gnustandarddirs", "linuxmembarrier", "pkgconfig", "pthreadsetname", "rt",
+        "sanitizers", "sourcelocation", "stdatomic", "systemtapsdt", "threads"};
+    static const std::map<std::string, std::string> nix_names = {{"boost", "boost"}, {"c-ares", "c-ares"}, {"cryptopp", "cryptopp"}, {"fmt", "fmt"}, {"gnutls", "gnutls"}, {"hwloc", "hwloc"},
+        {"liburing", "liburing"}, {"libxml2", "libxml2"}, {"lksctp-tools", "lksctp-tools"}, {"lz4", "lz4"}, {"openssl", "openssl"}, {"protobuf", "protobuf"}, {"python", "python3"},
+        {"python3", "python3"}, {"ragel", "ragel"}, {"ucontext", "libucontext"}, {"valgrind", "valgrind"}, {"xfsprogs", "xfsprogs"}, {"yaml-cpp", "yaml-cpp"}, {"zlib", "zlib"}};
+    static const std::regex find_package(R"((?:find_package|find_dependency|[A-Za-z0-9_]+_find_dep)\s*\(\s*([A-Za-z0-9_.+-]+))", std::regex::icase);
+    const auto add_cmake_package = [&](std::string package) {
+        package = normalized_package(std::move(package));
+        std::string compact = package;
+        compact.erase(std::remove(compact.begin(), compact.end(), '-'), compact.end());
+        if (cmake_builtins.contains(compact)) return;
+        if (const auto known = nix_names.find(package); known != nix_names.end()) dependencies.insert(known->second);
+        if (package == "gnutls") {
+            for (const auto dependency : {"gmp", "libidn2", "libtasn1", "libunistring", "nettle", "p11-kit", "zlib"}) dependencies.insert(dependency);
         }
-    }
-
-    // Default: gcc13 
-    return "gcc13";
-}
-
-std::string NixEnv::generate_shell_nix(const std::string &compiler, const std::string &cpp_standard, const std::vector<std::string> &extra_deps) {
-    std::ostringstream nix;
-    nix << "{ pkgs ? import <nixpkgs> {} }:\n";
-    nix << "pkgs.mkShell {\n";
-    nix << "  buildInputs = with pkgs; [\n";
-
-    // Compiler (only emit when non-empty)
-    if (!compiler.empty()) {
-        nix << "    " << compiler << "\n";
-    }
-
-    // Always include core build tools so the shell is self-contained
-    nix << "    cmake\n";
-    nix << "    ninja\n";
-    nix << "    pkg-config\n";
-
-    // Extra deps
-    for (const auto &dep : extra_deps) {
-        // Avoid duplicating the build tools already emitted above
-        if (dep == "cmake" || dep == "ninja" || dep == "pkg-config") continue;
-        nix << "    " << dep << "\n";
-    }
-
-    nix << "  ];\n";
-    nix << "}\n";
-
-    return nix.str();
-}
-
-bool NixEnv::build_in_shell(const std::filesystem::path &src_path, const std::filesystem::path &install_prefix, const std::string &shell_nix_content) {
-    namespace fs = std::filesystem;
-
-    // Write shell.nix
-    auto shell_nix_path = src_path / "shell.nix";
-    {
-        std::ofstream f(shell_nix_path);
-        f << shell_nix_content;
-    }
-
-    fs::create_directories(install_prefix / "include");
-    fs::create_directories(install_prefix / "lib");
-
-    int ret = -1;
-
-    // Strategy 1: configure.py
-    if (fs::exists(src_path / "configure.py")) {
-        std::string cmd = "cd " + src_path.string() +
-                          " && nix-shell " + shell_nix_path.string() +
-                          " --run '"
-                          "export MAKEFLAGS=\"-j$(nproc)\" && "
-                          "export CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) && "
-                          "export CMAKE_POLICY_VERSION_MINIMUM=3.5 && "
-                          "./configure.py --mode=release --prefix=" +
-                          install_prefix.string() +
-                          " && ninja -C build/release -j$(nproc)"
-                          " && ninja -C build/release install"
-                          "' 2>&1";
-        ret = std::system(cmd.c_str());
-    }
-
-    // Strategy 2: CMake (prefer Ninja generator)
-    if (ret != 0 && fs::exists(src_path / "CMakeLists.txt")) {
-        auto build_dir = src_path / "_cpm_build";
-        fs::create_directories(build_dir);
-        std::string cmd = "cd " + src_path.string() +
-                          " && nix-shell " + shell_nix_path.string() +
-                          " --run '"
-                          "export CMAKE_POLICY_VERSION_MINIMUM=3.5 && "
-                          "cd _cpm_build && cmake .. -GNinja"
-                          " -DCMAKE_INSTALL_PREFIX=" +
-                          install_prefix.string() +
-                          " -DCMAKE_BUILD_TYPE=Release"
-                          " -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF"
-                          " -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF"
-                          " && ninja -j$(nproc)"
-                          " && cmake --install ."
-                          "' 2>&1";
-        ret = std::system(cmd.c_str());
-        if (fs::exists(build_dir)) fs::remove_all(build_dir);
-    }
-
-    // Strategy 3: Make
-    if (ret != 0 && (fs::exists(src_path / "Makefile") || fs::exists(src_path / "makefile"))) {
-        std::string cmd = "cd " + src_path.string() +
-                          " && nix-shell " + shell_nix_path.string() +
-                          " --run '"
-                          "make -j$(nproc) && make install PREFIX=" +
-                          install_prefix.string() + "' 2>&1";
-        ret = std::system(cmd.c_str());
-    }
-
-    // copy source headers if build didn't install them
-    auto src_inc = src_path / "include";
-    if (fs::exists(src_inc) && (ret != 0 || fs::is_empty(install_prefix / "include"))) {
-        std::string cp = "cp -r " + src_inc.string() + "/* " + (install_prefix / "include").string() + "/ 2>/dev/null";
-        std::system(cp.c_str());
-    }
-
-    // Copy .a files from build directories
-    if (fs::exists(src_path / "build")) {
-        std::string find_libs = "find " + (src_path / "build").string() + " -name '*.a' -not -path '*/_cooking/*' -exec cp {} " + (install_prefix / "lib").string() + "/ \\; 2>/dev/null";
-        std::system(find_libs.c_str());
-
-        // Copy generated headers
-        std::string find_gen = "find " + (src_path / "build").string() +
-                               " -path '*/gen/include/*' -type f \\( -name '*.hh' -o -name '*.h' \\)"
-                               " -exec sh -c '"
-                               "rel=$(echo {} | sed \"s|.*/gen/include/||\")"
-                               " && mkdir -p " +
-                               (install_prefix / "include").string() +
-                               "/$(dirname $rel)"
-                               " && cp {} " +
-                               (install_prefix / "include").string() +
-                               "/$rel"
-                               "' \\; 2>/dev/null";
-        std::system(find_gen.c_str());
-    }
-
-    return (ret == 0) || !fs::is_empty(install_prefix / "include");
-}
-
-void NixEnv::link_nix_packages(const std::vector<std::string> &packages, const std::filesystem::path &include_dir, const std::filesystem::path &lib_dir) {
-    namespace fs = std::filesystem;
-    fs::create_directories(include_dir);
-    fs::create_directories(lib_dir);
-
-    for (const auto &pkg : packages) {
-        // Get nix store path (try .dev first for headers)
-        std::string store_path = run_cmd("nix-build '<nixpkgs>' -A " + pkg + ".dev --no-out-link 2>/dev/null");
-        if (store_path.empty()) {
-            store_path = run_cmd("nix-build '<nixpkgs>' -A " + pkg + " --no-out-link 2>/dev/null");
-        }
-        if (store_path.empty()) continue;
-
-        // Symlink headers
-        auto pkg_inc = std::filesystem::path(store_path) / "include";
-        if (fs::exists(pkg_inc)) {
-            for (const auto &entry : fs::directory_iterator(pkg_inc)) {
-                auto target = include_dir / entry.path().filename();
-                if (!fs::exists(target) && !fs::is_symlink(target)) {
-                    fs::create_symlink(entry.path(), target);
+    };
+    // Map of include path prefixes (the directory component after <) to nix packages.
+    // Covers headers that are required unconditionally in source files but never
+    // declared via find_package() in the project's CMake files.
+    static const std::map<std::string, std::string> include_prefix_to_nix = {
+        {"xfs/", "xfsprogs"},
+        {"liburing", "liburing"},
+        {"dpdk/", "dpdk"},
+        {"numa", "numactl"},
+        {"libaio", "libaio"},
+        {"sctp", "lksctp-tools"},
+    };
+    try {
+        for (const auto &entry : fs::recursive_directory_iterator(source, fs::directory_options::skip_permission_denied)) {
+            if (!entry.is_regular_file()) continue;
+            const auto &path = entry.path();
+            const auto filename = path.filename().string();
+            const auto ext = path.extension().string();
+            // Scan CMake files for find_package() calls.
+            if (filename == "CMakeLists.txt" || ext == ".cmake") {
+                std::ifstream input(path);
+                const std::string contents((std::istreambuf_iterator<char>(input)), {});
+                for (std::sregex_iterator match(contents.begin(), contents.end(), find_package), end; match != end; ++match) {
+                    add_cmake_package((*match)[1].str());
                 }
+                if (filename.starts_with("Find") && filename.ends_with(".cmake")) add_cmake_package(filename.substr(4, filename.size() - 10));
+                continue;
             }
-        }
-
-        // Symlink libs
-        auto pkg_lib = std::filesystem::path(store_path) / "lib";
-        if (!fs::exists(pkg_lib)) {
-            // Try non-dev output for libs
-            std::string lib_path = run_cmd("nix-build '<nixpkgs>' -A " + pkg + " --no-out-link 2>/dev/null");
-            if (!lib_path.empty()) pkg_lib = std::filesystem::path(lib_path) / "lib";
-        }
-        if (fs::exists(pkg_lib)) {
-            for (const auto &entry : fs::directory_iterator(pkg_lib)) {
-                if (!entry.is_regular_file() && !entry.is_symlink()) continue;
-                auto ext = entry.path().extension().string();
-                if (ext == ".a" || ext == ".so") {
-                    auto target = lib_dir / entry.path().filename();
-                    if (!fs::exists(target) && !fs::is_symlink(target)) {
-                        fs::create_symlink(entry.path(), target);
+            // Scan C/C++ source and header files for #include directives that
+            // reference system headers not advertised via find_package().
+            if (ext == ".c" || ext == ".cc" || ext == ".cpp" || ext == ".cxx" || ext == ".h" || ext == ".hh" || ext == ".hpp" || ext == ".hxx") {
+                static const std::regex system_include(R"(^\s*#\s*include\s*<([^>]+)>)", std::regex::multiline);
+                std::ifstream input(path);
+                if (!input) continue;
+                const std::string contents((std::istreambuf_iterator<char>(input)), {});
+                for (std::sregex_iterator match(contents.begin(), contents.end(), system_include), end; match != end; ++match) {
+                    const auto header = (*match)[1].str();
+                    for (const auto &[prefix, nix_pkg] : include_prefix_to_nix) {
+                        if (header.starts_with(prefix)) {
+                            dependencies.insert(nix_pkg);
+                            break;
+                        }
                     }
                 }
             }
         }
+    } catch (const fs::filesystem_error &) {
     }
+    return {dependencies.begin(), dependencies.end()};
 }
 
-int NixEnv::run_in_shell(const std::string &cmd, const std::filesystem::path &shell_nix_path) {
-    std::string nix_cmd = "nix-shell " + shell_nix_path.string() + " --run '" + cmd + "' 2>&1";
-    return std::system(nix_cmd.c_str());
+std::string NixEnv::generate_shell_nix(const std::string &compiler, const std::string & /*cpp_standard*/, const std::vector<std::string> &extra_deps) const {
+    if (!compiler.empty() && !valid_attribute(compiler)) throw std::runtime_error("invalid Nix compiler attribute");
+    std::set<std::string> packages;
+    if (!compiler.empty()) packages.insert(compiler);
+    for (const auto &dependency : extra_deps) {
+        if (!valid_attribute(dependency)) throw std::runtime_error("invalid Nix dependency attribute: " + dependency);
+        packages.insert(dependency);
+    }
+    std::ostringstream expression;
+    expression << "{ pkgs ? import <nixpkgs> {} }:\n"
+               << "pkgs.mkShell {\n  packages = with pkgs; [\n";
+    for (const auto &package : packages) expression << "    " << package << '\n';
+    expression << "  ];\n}\n";
+    return expression.str();
+}
+
+std::string NixEnv::build_package(const std::string &attribute, const std::string &nixpkgs_pin) const {
+    if (!valid_attribute(attribute)) throw std::runtime_error("invalid Nix package attribute: " + attribute);
+    fs::create_directories(cpm_dir_);
+    ProcessResult result;
+    if (nixpkgs_pin.empty()) {
+        result = Process::run({"nix-build", "<nixpkgs>", "-A", attribute, "--no-out-link"}, {}, {}, true);
+    } else {
+        const auto expression_path = cpm_dir_ / "resolve-package.nix";
+        std::ofstream expression(expression_path, std::ios::trunc);
+        expression << "let pkgs = import (builtins.fetchTarball { url = "
+                   << "\"https://github.com/NixOS/nixpkgs/archive/" << nixpkgs_pin << ".tar.gz\"; }) {}; in pkgs." << attribute << '\n';
+        expression.close();
+        result = Process::run({"nix-build", expression_path.string(), "--no-out-link"}, {}, {}, true);
+    }
+    if (result.exit_code != 0) return {};
+    std::istringstream lines(result.output);
+    std::string line;
+    std::string last;
+    while (std::getline(lines, line))
+        if (!trim(line).empty()) last = trim(line);
+    return last;
 }
 
 } // namespace cpm

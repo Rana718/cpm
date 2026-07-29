@@ -1,146 +1,77 @@
-#!/bin/bash
-# CPM Installer — installs cpm + nix on any Linux distro
-set -e
+#!/bin/sh
+set -eu
 
-VERSION="0.1.0"
-INSTALL_DIR="/usr/local/bin"
-CPM_REPO="https://github.com/Rana718/cpm"  # TODO: update with actual repo
+REPOSITORY=${CPM_REPOSITORY:-https://github.com/Rana718/cpm}
+PREFIX=${CPM_INSTALL_PREFIX:-"$HOME/.local"}
+WITH_NIX=0
 
-echo ""
-echo "  ██████╗██████╗ ███╗   ███╗"
-echo " ██╔════╝██╔══██╗████╗ ████║"
-echo " ██║     ██████╔╝██╔████╔██║"
-echo " ██║     ██╔═══╝ ██║╚██╔╝██║"
-echo " ╚██████╗██║     ██║ ╚═╝ ██║"
-echo "  ╚═════╝╚═╝     ╚═╝     ╚═╝"
-echo "  C/C++ Package Manager v$VERSION"
-echo ""
-
-# ─── Detect distro ────────────────────────────────────────────
-
-detect_distro() {
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        echo "$ID"
-    elif [ -f /etc/arch-release ]; then
-        echo "arch"
-    elif [ -f /etc/debian_version ]; then
-        echo "debian"
-    elif [ -f /etc/fedora-release ]; then
-        echo "fedora"
-    else
-        echo "unknown"
-    fi
+usage() {
+    printf '%s\n' "Usage: ./install.sh [--prefix PATH] [--with-nix]" \
+        "" \
+        "Installs CPM without modifying system package directories." \
+        "Default prefix: $PREFIX"
 }
 
-DISTRO=$(detect_distro)
-echo "[cpm] Detected distro: $DISTRO"
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --prefix)
+            [ "$#" -ge 2 ] || { printf '%s\n' "missing value for --prefix" >&2; exit 2; }
+            PREFIX=$2
+            shift 2
+            ;;
+        --with-nix)
+            WITH_NIX=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            printf 'unknown option: %s\n' "$1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
 
-# ─── Install system dependencies ──────────────────────────────
+missing=""
+for command in git cmake c++; do
+    command -v "$command" >/dev/null 2>&1 || missing="$missing $command"
+done
+if [ -n "$missing" ]; then
+    printf 'missing required build tools:%s\n' "$missing" >&2
+    printf '%s\n' "Install them with your OS package manager, then rerun this script." >&2
+    exit 1
+fi
 
-echo "[cpm] Installing build dependencies..."
+source_temp=""
+build_dir=""
+cleanup() {
+    [ -z "$source_temp" ] || rm -rf "$source_temp"
+    [ -z "$build_dir" ] || rm -rf "$build_dir"
+}
+trap cleanup EXIT HUP INT TERM
 
-case "$DISTRO" in
-    arch|manjaro|endeavouros)
-        sudo pacman -S --needed --noconfirm git cmake ninja gcc curl
-        ;;
-    ubuntu|debian|pop|linuxmint)
-        sudo apt update -qq
-        sudo apt install -y git cmake ninja-build g++ curl build-essential
-        ;;
-    fedora|rhel|centos|rocky|alma)
-        sudo dnf install -y git cmake ninja-build gcc-c++ curl
-        ;;
-    opensuse*)
-        sudo zypper install -y git cmake ninja gcc-c++ curl
-        ;;
-    void)
-        sudo xbps-install -Sy git cmake ninja gcc curl
-        ;;
-    alpine)
-        sudo apk add git cmake ninja g++ curl bash
-        ;;
-    *)
-        echo "[cpm] Unknown distro '$DISTRO'. Please install manually: git cmake ninja g++ curl"
-        echo "[cpm] Then re-run this script."
-        exit 1
-        ;;
+if [ -f CMakeLists.txt ] && grep -q 'project(cpm' CMakeLists.txt; then
+    source_dir=$(pwd)
+else
+    source_temp=$(mktemp -d "${TMPDIR:-/tmp}/cpm-install.XXXXXX")
+    git clone --depth 1 --quiet "$REPOSITORY" "$source_temp/source"
+    source_dir=$source_temp/source
+fi
+
+build_dir=$(mktemp -d "${TMPDIR:-/tmp}/cpm-build.XXXXXX")
+cmake -S "$source_dir" -B "$build_dir" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+cmake --build "$build_dir" --parallel
+cmake --install "$build_dir" --prefix "$PREFIX"
+
+printf 'Installed %s\n' "$PREFIX/bin/cpm"
+case ":${PATH}:" in
+    *":$PREFIX/bin:"*) ;;
+    *) printf 'Add %s/bin to PATH.\n' "$PREFIX" ;;
 esac
 
-# ─── Install Nix (isolated package manager) ───────────────────
-
-if command -v nix &>/dev/null; then
-    echo "[cpm] Nix already installed: $(nix --version)"
-else
-    echo ""
-    echo "[cpm] Installing Nix (for isolated C/C++ build environments)..."
-    echo "[cpm] This enables reproducible builds without polluting your system."
-    echo ""
-
-    # Use Determinate Systems installer (faster, cleaner)
-    if curl -sI "https://install.determinate.systems/nix" &>/dev/null; then
-        curl --proto '=https' --tlsv1.2 -sSf -L \
-            https://install.determinate.systems/nix | sh -s -- install --no-confirm
-    else
-        # Fallback to official nix installer
-        sh <(curl -L https://nixos.org/nix/install) --daemon
-    fi
-
-    # Source nix in current shell
-    if [ -f /etc/profile.d/nix-daemon.sh ]; then
-        . /etc/profile.d/nix-daemon.sh
-    elif [ -f "$HOME/.nix-profile/etc/profile.d/nix.sh" ]; then
-        . "$HOME/.nix-profile/etc/profile.d/nix.sh"
-    fi
-
-    # Add nixpkgs channel
-    if command -v nix-channel &>/dev/null; then
-        nix-channel --add https://nixos.org/channels/nixpkgs-unstable nixpkgs
-        nix-channel --update
-    fi
-
-    echo "[cpm] Nix installed: $(nix --version 2>/dev/null || echo 'restart shell to use')"
+if [ "$WITH_NIX" -eq 1 ]; then
+    "$PREFIX/bin/cpm" setup
 fi
-
-# ─── Build and install cpm ─────────────────────────────────────
-
-echo ""
-echo "[cpm] Building cpm..."
-
-# Check if we're in the cpm source directory
-if [ -f "CMakeLists.txt" ] && grep -q "project(cpm" CMakeLists.txt 2>/dev/null; then
-    SRC_DIR="."
-else
-    # Clone the repo
-    TMPDIR=$(mktemp -d)
-    echo "[cpm] Cloning cpm source..."
-    git clone --depth 1 "$CPM_REPO" "$TMPDIR/cpm" 2>/dev/null || {
-        echo "[cpm] ERROR: Could not clone cpm repo."
-        echo "[cpm] If you have the source, run this script from the cpm directory."
-        exit 1
-    }
-    SRC_DIR="$TMPDIR/cpm"
-fi
-
-# Build
-mkdir -p "$SRC_DIR/build"
-cd "$SRC_DIR/build"
-cmake .. -DCMAKE_BUILD_TYPE=Release > /dev/null 2>&1
-cmake --build . -j$(nproc)
-
-# Install
-sudo cp cpm "$INSTALL_DIR/cpm"
-sudo chmod +x "$INSTALL_DIR/cpm"
-
-echo ""
-echo "[cpm] ✓ Installed cpm to $INSTALL_DIR/cpm"
-echo "[cpm] ✓ Version: $(cpm --version 2>/dev/null || echo $VERSION)"
-echo ""
-echo "[cpm] Quick start:"
-echo "  mkdir myproject && cd myproject"
-echo "  cpm init myapp"
-echo "  cpm run"
-echo ""
-echo "[cpm] Or run a single file:"
-echo "  cpm run hello.cpp"
-echo ""

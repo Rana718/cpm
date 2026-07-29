@@ -4,10 +4,10 @@ vars:
    SRC_FILES:
       sh: find src include -name '*.cpp' -o -name '*.hpp' | tr '\n' ' '
    BUILD_DIR: build
-   INSTALL_PREFIX: /usr/local
+   INSTALL_PREFIX: '{{.HOME}}/.local'
 
 tasks:
-   default:
+   build:
       desc: Build cpm
       cmds:
          - mkdir -p {{.BUILD_DIR}}
@@ -46,19 +46,17 @@ tasks:
          - echo "[task] All fixes applied"
 
    install:
-      desc: Build and install cpm to system (/usr/local/bin)
+      desc: Build and install cpm for the current user
       cmds:
-         - task: default
-         - sudo rm -f {{.INSTALL_PREFIX}}/bin/cpm
-         - sudo cp {{.BUILD_DIR}}/cpm {{.INSTALL_PREFIX}}/bin/cpm
-         - sudo chmod +x {{.INSTALL_PREFIX}}/bin/cpm
+         - task: build
+         - cmake --install {{.BUILD_DIR}} --prefix {{.INSTALL_PREFIX}}
          - echo "[task] Installed cpm $(cpm --version 2>/dev/null || echo 'v0.1.0')"
          - echo "[task] Run 'cpm --version' to verify"
 
    uninstall:
-      desc: Remove cpm from system
+      desc: Remove the user-local cpm binary
       cmds:
-         - sudo rm -f {{.INSTALL_PREFIX}}/bin/cpm
+         - rm -f {{.INSTALL_PREFIX}}/bin/cpm
          - echo "[task] Removed cpm from {{.INSTALL_PREFIX}}/bin/"
 
    clean:

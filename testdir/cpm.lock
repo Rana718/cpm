@@ -1,0 +1,4 @@
+version 2
+header "json" "https://github.com/nlohmann/json" "*" "55f93686c01528224f448c19128836e7df245f72"
+system "seastar" "https://github.com/scylladb/seastar" "*" "8df8212e53577e1d8477a5c901457cd61d88afc7"
+system "llhttp" "https://github.com/nodejs/llhttp" "*" "01e105a30fd06e248bc8ac73c4adb34a63d4114a"

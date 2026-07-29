@@ -1,11 +1,13 @@
 #include "cpm/config.hpp"
 #include "cpm/nix_env.hpp"
 #include "cpm/package_manager.hpp"
+#include "cpm/process.hpp"
 
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <string>
 
 static void print_usage() {
@@ -29,9 +31,11 @@ COMMANDS:
     build -s            Production build (optimized, stripped, portable bundle)
     start               Run the built binary
     install             Install all dependencies from cpm.toml
-    add <package>       Add a package (github:user/repo@version)
+    add <package>       Add a header package
+    add --system <pkg>  Add a compiled Git package
+    add --lib <name=attr> Add a Nix library
     remove <name>       Remove a package
-    update              Re-download and rebuild all packages
+    update              Refresh moving refs and rebuild the environment
     list                List installed packages
     info                Show system and compiler info
     setup               Install nix backend (enables fast pre-built packages)
@@ -63,53 +67,70 @@ int main(int argc, char *argv[]) {
     }
 
     const std::string command = argv[1];
-    cpm::PackageManager pm;
 
     try {
+        std::unique_ptr<cpm::PackageManager> manager;
+        auto pm = [&]() -> cpm::PackageManager & {
+            if (!manager) manager = std::make_unique<cpm::PackageManager>();
+            return *manager;
+        };
         if (command == "init") {
             if (argc < 3) {
                 std::cerr << "[cpm] ERROR: cpm init <name>\n";
                 return 1;
             }
-            pm.init(argv[2]);
+            pm().init(argv[2]);
 
         } else if (command == "run") {
             if (argc >= 3) {
                 std::string arg = argv[2];
-                // Single-file mode: any argument containing a .c extension
-                if (arg.find(".c") != std::string::npos) return pm.run_file(arg);
+                const auto extension = std::filesystem::path(arg).extension().string();
+                if (extension == ".c" || extension == ".C" || extension == ".cc" || extension == ".cpp" || extension == ".cxx") return pm().run_file(arg);
             }
-            return pm.run();
+            return pm().run();
 
         } else if (command == "build") {
             bool static_build = (argc >= 3 && std::string(argv[2]) == "-s");
-            return pm.build(static_build);
+            return pm().build(static_build);
 
         } else if (command == "start") {
-            return pm.start();
+            return pm().start();
 
         } else if (command == "install") {
-            pm.install();
+            pm().install();
 
         } else if (command == "add") {
             if (argc < 3) {
                 std::cerr << "[cpm] ERROR: cpm add github:user/repo@version\n";
                 return 1;
             }
-            pm.install_package(argv[2]);
+            std::string kind = "header";
+            int package_index = 2;
+            if (std::string(argv[2]) == "--system") {
+                kind = "system";
+                package_index = 3;
+            } else if (std::string(argv[2]) == "--lib") {
+                kind = "nix";
+                package_index = 3;
+            }
+            if (argc <= package_index) {
+                std::cerr << "[cpm] ERROR: missing package specification\n";
+                return 1;
+            }
+            pm().install_package(argv[package_index], kind);
 
         } else if (command == "remove" || command == "rm") {
             if (argc < 3) {
                 std::cerr << "[cpm] ERROR: cpm remove <name>\n";
                 return 1;
             }
-            pm.remove_package(argv[2]);
+            pm().remove_package(argv[2]);
 
         } else if (command == "update") {
-            pm.update();
+            pm().update();
 
         } else if (command == "list" || command == "ls") {
-            pm.list();
+            pm().list();
 
         } else if (command == "info") {
             print_info();
@@ -121,9 +142,13 @@ int main(int argc, char *argv[]) {
             if (nix.available()) {
                 std::cout << "[cpm] Nix is already installed and ready.\n";
             } else {
-                std::system("curl --proto '=https' --tlsv1.2 -sSf -L "
-                            "https://install.determinate.systems/nix"
-                            " | sh -s -- install --no-confirm 2>&1");
+                const auto installer = std::filesystem::temp_directory_path() / "cpm-nix-installer.sh";
+                const auto download = cpm::Process::run({"curl", "--proto", "=https", "--tlsv1.2", "-fsSL", "https://install.determinate.systems/nix", "-o", installer.string()});
+                if (download.exit_code != 0) throw std::runtime_error("failed to download the Nix installer");
+                const auto install = cpm::Process::run({"sh", installer.string(), "install", "--no-confirm"});
+                std::error_code error;
+                std::filesystem::remove(installer, error);
+                if (install.exit_code != 0) throw std::runtime_error("Nix installation failed");
             }
 
         } else if (command == "--help" || command == "-h" || command == "help") {

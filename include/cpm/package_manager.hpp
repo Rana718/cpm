@@ -16,7 +16,7 @@ class PackageManager {
 
     // Dependency management (delegates to Installer)
     void install();
-    void install_package(const std::string &package_spec);
+    void install_package(const std::string &package_spec, const std::string &kind = "header");
     void remove_package(const std::string &package_name);
     void update();
     void list() const;
@@ -38,9 +38,6 @@ class PackageManager {
 
     // Regenerate compile_commands.json for clangd
     void generate_compile_commands() const;
-
-    // Symlink all package headers into .cpm/include/
-    void export_package_headers() const;
 };
 
 } // namespace cpm

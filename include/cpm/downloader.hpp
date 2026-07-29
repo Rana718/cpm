@@ -19,12 +19,15 @@ class Downloader {
     void resolve_system_dependency(const SystemDependency &dep, const std::filesystem::path &project_root);
 
     // Cache helpers
-    [[nodiscard]] bool is_cached(const std::string &name, const std::string &version) const;
-    [[nodiscard]] std::filesystem::path get_cache_path(const std::string &name, const std::string &version) const;
-    void link_from_cache(const std::string &name, const std::string &version);
+    [[nodiscard]] bool is_cached(const std::string &name, const std::string &version, const std::string &source = {}) const;
+    [[nodiscard]] std::filesystem::path get_cache_path(const std::string &name, const std::string &version, const std::string &source = {}) const;
+    [[nodiscard]] std::filesystem::path get_source_cache_path(const std::string &name, const std::string &version, const std::string &source = {}) const;
+    [[nodiscard]] std::filesystem::path get_built_cache_path(const std::string &name, const std::string &version, const std::string &source = {}) const;
+    void link_from_cache(const std::string &name, const std::string &version, const std::string &source = {});
 
     // Resolve the latest git tag for a GitHub URL
     std::string resolve_latest_tag(const std::string &github_url, const std::string &name);
+    std::string resolve_git_ref(const std::string &git_url, const std::string &requested_ref, const std::string &name);
 
   private:
     std::filesystem::path local_cpm_dir_;
@@ -37,29 +40,7 @@ class Downloader {
     // Symlink/copy built artifacts (headers + libs) into local .cpm/
     void install_built_library(const std::string &name, const std::filesystem::path &built_path);
 
-    // Parse CMakeLists.txt find_package() calls and recursively fetch/build them
-    void resolve_transitive_deps(const std::filesystem::path &src_path, const std::filesystem::path &install_prefix);
-
-    // Search GitHub API for a package by name, return clone URL
-    std::string search_github_repo(const std::string &package_name);
-
-    // Build stow from source if not on PATH (needed by cooking.sh)
-    void ensure_build_tools(const std::filesystem::path &bin_dir);
-
-    // Derive the nix compiler attribute name from a cpm.toml compiler string
-    // e.g. "gcc-13" → "gcc13", "clang-17" → "clang_17"
-    static std::string compiler_to_nix_attr(const std::string &compiler);
-
-    // Parse all .pc files in a pkgconfig directory, resolve variable
-    // substitutions, and return every unique -I/nix/store/... path found.
-    static std::vector<std::filesystem::path> collect_pc_nix_includes(
-        const std::filesystem::path &pc_dir);
-
-    // Full version: returns all -I and -D flags found in .pc files, and
-    // separately the nix-store include paths for symlinking into .cpm/include/.
-    static void collect_pc_flags(const std::filesystem::path &pc_dir,
-                                 std::vector<std::string> &out_flags,
-                                 std::vector<std::filesystem::path> &out_nix_incs);
+    static std::string cache_component(const std::string &value);
 };
 
 } // namespace cpm
